@@ -8,7 +8,7 @@ from qiskit_finance.circuit.library import LogNormalDistribution
 from qiskit_finance.applications.estimation import EuropeanCallPricing, EuropeanCallDelta
 
 
-def price_Eurocall(S0 : float, K : float,  r : float, vol : float, T : float, n_qubits : int,  c_approx : float) -> float :
+def price_Eurocall(S0 : float, K : float,  r : float, vol : float, T : float, n_qubits : int,  c_approx : float, epsilon : float=0.01) -> float :
     """
     Function to call to price an european call using Qiskit framework 
     """
@@ -34,7 +34,6 @@ def price_Eurocall(S0 : float, K : float,  r : float, vol : float, T : float, n_
         uncertainty_model=uncertainty_model,
     )
 
-    epsilon = 0.01
     alpha = 0.05
 
     sampler = StatevectorSampler()
@@ -51,7 +50,7 @@ def price_Eurocall(S0 : float, K : float,  r : float, vol : float, T : float, n_
     return european_call_pricing.interpret(result)
 
 
-def price_Europut(S0 : float, K : float, r : float, vol : float, T : float, n_qubits : int, c_approx : float) -> float :
+def price_Europut(S0 : float, K : float, r : float, vol : float, T : float, n_qubits : int, c_approx : float, epsilon : float=0.01) -> float :
     """
     Wrapper to price an European Put with Quantum framework (Qiskit)
     """
@@ -89,7 +88,6 @@ def price_Europut(S0 : float, K : float, r : float, vol : float, T : float, n_qu
 
     european_put = european_put_objective.compose(uncertainty_model, front=True)
 
-    epsilon = 0.01
     alpha = 0.05
 
     problem = EstimationProblem(
