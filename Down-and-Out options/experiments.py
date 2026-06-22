@@ -154,7 +154,7 @@ def experiment_2(
 # Experiment 3
 # ----------------------------------------------------------------------
 def experiment_3(
-    Ns=(32, 64, 128, 256, 512),
+    Ns=(32, 64, 128, 256, 512, 1024),
     N_ref: int = 2048,
     B_ratio: float = 0.8,
     frequency: str = "daily",
@@ -258,3 +258,70 @@ if __name__ == "__main__":
     print(experiment_3())
     print("\nRunning Experiment 4...")
     print(experiment_4())
+
+
+# ----------------------------------------------------------------------
+# Extra check (requested follow-up): |V_Hamiltonian - V_MonteCarlo| vs N
+# ----------------------------------------------------------------------
+def hamiltonian_vs_mc_stabilization(
+    Ns=(32, 64, 128, 256, 512),
+    B_ratio: float = 0.8,
+    frequency: str = "daily",
+    n_mc_paths: int = 1_000_000,
+    mc_seed: int = 2026,
+) -> pd.DataFrame:
+    """For a fixed (single, large-sample) Monte Carlo benchmark, compute
+    |V_Hamiltonian(N) - V_MonteCarlo| as the spatial grid is refined.
+
+    This isolates the *residual* gap to the Monte Carlo benchmark once
+    the Hamiltonian scheme has spatially converged: that residual is
+    expected to stabilize around the Monte Carlo standard error (it
+    reflects MC sampling noise / discrete-monitoring vs scheme
+    differences, not further reducible Hamiltonian discretization
+    error).
+    """
+    S0, K, sigma, r, T = MARKET["S0"], MARKET["K"], MARKET["sigma"], MARKET["r"], MARKET["T"]
+    B = B_ratio * S0
+
+    # one single, large, fixed Monte Carlo benchmark
+    mc = MonteCarloPricer(S0=S0, K=K, B=B, sigma=sigma, r=r, T=T, seed=mc_seed)
+    mc_res = mc.price(n_paths=n_mc_paths, frequency=frequency)
+    V_MC = mc_res.price
+
+    rows = []
+    for N in Ns:
+        hp = HamiltonianPricer(S0=S0, K=K, B=B, sigma=sigma, r=r, T=T, N=N, n_std=10)
+        V_H = hp.price(frequency=frequency)
+        rows.append(
+            {
+                "N": N,
+                "h": hp.h,
+                "V_Hamiltonian": V_H,
+                "V_MonteCarlo": V_MC,
+                "abs_gap": abs(V_H - V_MC),
+                "MC_std_error": mc_res.std_error,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    df.attrs["V_MonteCarlo"] = V_MC
+    df.attrs["MC_std_error"] = mc_res.std_error
+    df.attrs["MC_n_paths"] = n_mc_paths
+    df.to_csv(f"{TAB_DIR}/extra_hamiltonian_vs_mc_stabilization.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(df["N"], df["abs_gap"], "o-", label=r"$|V_H(N) - V_{MC}|$")
+    ax.axhline(
+        1.96 * mc_res.std_error,
+        color="red",
+        linestyle="--",
+        label="MC 95% half-width (1.96 SE)",
+    )
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("N (spatial grid size, log scale)")
+    ax.set_ylabel(r"$|V_H - V_{MC}|$")
+    ax.set_title("Hamiltonian-MonteCarlo gap vs spatial resolution")
+    ax.legend()
+    _savefig(fig, "extra_hamiltonian_vs_mc_stabilization")
+
+    return df

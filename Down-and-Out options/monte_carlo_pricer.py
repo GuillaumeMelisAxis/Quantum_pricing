@@ -82,20 +82,42 @@ class MonteCarloPricer:
         frequency: MonitoringFrequency = "daily",
         n_monitoring: int | None = None,
         confidence: float = 0.95,
+        chunk_size: int = 100_000,
     ) -> MonteCarloResult:
         """Price a Down-and-Out Call via Monte Carlo and return price,
         standard error and confidence interval.
+
+        Simulation is processed in chunks of `chunk_size` paths to keep
+        memory usage bounded for large `n_paths` (e.g. 500_000 -
+        1_000_000), while remaining exactly reproducible (a single RNG,
+        seeded once, is advanced across chunks).
         """
-        paths = self.simulate_paths(n_paths, frequency, n_monitoring)
+        schedule = build_monitoring_schedule(self.T, frequency, n_monitoring)
+        dts = np.diff(schedule)
+        rng = np.random.default_rng(self.seed)
 
-        knocked_out = np.any(paths[:, 1:] <= self.B, axis=1)
-        terminal = paths[:, -1]
-        payoff = np.where(knocked_out, 0.0, np.maximum(terminal - self.K, 0.0))
-        discounted = np.exp(-self.r * self.T) * payoff
+        total = 0.0
+        total_sq = 0.0
+        remaining = n_paths
+        while remaining > 0:
+            batch = min(chunk_size, remaining)
+            Z = rng.standard_normal(size=(batch, len(dts)))
+            log_increments = (self.r - 0.5 * self.sigma ** 2) * dts + self.sigma * np.sqrt(dts) * Z
+            log_S = np.log(self.S0) + np.cumsum(log_increments, axis=1)
 
-        price = discounted.mean()
-        std = discounted.std(ddof=1)
-        se = std / np.sqrt(n_paths)
+            knocked_out = np.any(log_S <= np.log(self.B), axis=1)
+            terminal = np.exp(log_S[:, -1])
+            payoff = np.where(knocked_out, 0.0, np.maximum(terminal - self.K, 0.0))
+            discounted = np.exp(-self.r * self.T) * payoff
+
+            total += discounted.sum()
+            total_sq += (discounted ** 2).sum()
+            remaining -= batch
+
+        price = total / n_paths
+        var = total_sq / n_paths - price ** 2
+        var = max(var, 0.0) * n_paths / (n_paths - 1)
+        se = np.sqrt(var / n_paths)
 
         from scipy.stats import norm
 
