@@ -161,16 +161,38 @@ def experiment_3(
 ) -> pd.DataFrame:
     """Spatial convergence study. Computes |V_N - V_ref| for a sequence
     of grid sizes N, estimates the convergence order p via a log-log
-    least-squares fit, and produces the convergence table/plot."""
+    least-squares fit, and produces the convergence table/plot.
+
+    To isolate the genuine Hamiltonian discretization error from
+    spurious N-dependent noise, the computational domain is snapped to
+    the barrier *once*, on the coarsest grid in the (nested) sequence
+    Ns + (N_ref,), and then reused unchanged (snap_barrier=False) for
+    every other N. Since each subsequent N is an integer multiple of
+    the coarsest one, this keeps the barrier exactly on a grid node at
+    every resolution while guaranteeing that all grids share the exact
+    same domain -- removing the small per-N domain jitter that would
+    otherwise be introduced if the barrier were re-snapped independently
+    at each N (which shifts x_min/x_max by an amount that depends on h).
+    """
     S0, K, sigma, r, T = MARKET["S0"], MARKET["K"], MARKET["sigma"], MARKET["r"], MARKET["T"]
     B = B_ratio * S0
 
-    hp_ref = HamiltonianPricer(S0=S0, K=K, B=B, sigma=sigma, r=r, T=T, N=N_ref, n_std=10)
+    N_coarsest = min(min(Ns), N_ref)
+    hp_coarse = HamiltonianPricer(S0=S0, K=K, B=B, sigma=sigma, r=r, T=T, N=N_coarsest, n_std=10)
+    x_min, x_max = hp_coarse.x_min, hp_coarse.x_max
+
+    def _price(N: int) -> HamiltonianPricer:
+        return HamiltonianPricer(
+            S0=S0, K=K, B=B, sigma=sigma, r=r, T=T, N=N,
+            x_min=x_min, x_max=x_max
+        )
+
+    hp_ref = _price(N_ref)
     V_ref = hp_ref.price(frequency=frequency)
 
     rows = []
     for N in Ns:
-        hp = HamiltonianPricer(S0=S0, K=K, B=B, sigma=sigma, r=r, T=T, N=N, n_std=10)
+        hp = _price(N)
         V_N = hp.price(frequency=frequency)
         h = hp.h
         err = abs(V_N - V_ref)
@@ -323,5 +345,83 @@ def hamiltonian_vs_mc_stabilization(
     ax.set_title("Hamiltonian-MonteCarlo gap vs spatial resolution")
     ax.legend()
     _savefig(fig, "extra_hamiltonian_vs_mc_stabilization")
+
+    return df
+
+
+# ----------------------------------------------------------------------
+# Auxiliary experiment: isolate the projector effect with M=1
+# ----------------------------------------------------------------------
+def experiment_3b(
+    Ns=(32, 64, 128, 256, 512, 1024),
+    N_ref: int = 2048,
+    B_ratio: float = 0.8,
+) -> pd.DataFrame:
+    """Auxiliary convergence study with a single monitoring date (M=1).
+
+    By reducing the barrier monitoring to a single check at maturity,
+    the cumulative effect of M repeated projections on spatial
+    convergence is suppressed. The resulting error sequence should
+    follow the theoretical O(h^2) rate almost monotonically, confirming
+    that the non-monotone behaviour observed in Experiment 3 (daily
+    monitoring, M=252) originates from the repeated application of P_B
+    rather than from the spatial discretization itself.
+    """
+    S0, K, sigma, r, T = MARKET["S0"], MARKET["K"], MARKET["sigma"], MARKET["r"], MARKET["T"]
+    B = B_ratio * S0
+
+    # frozen nested domain (snapped once on the coarsest grid)
+    N_coarsest = min(min(Ns), N_ref)
+    hp_coarse = HamiltonianPricer(S0=S0, K=K, B=B, sigma=sigma, r=r, T=T,
+                                  N=N_coarsest, n_std=10)
+    x_min, x_max = hp_coarse.x_min, hp_coarse.x_max
+
+    def _pricer(N):
+        return HamiltonianPricer(S0=S0, K=K, B=B, sigma=sigma, r=r, T=T,
+                                 N=N, x_min=x_min, x_max=x_max)
+
+    V_ref = _pricer(N_ref).price(frequency="continuous", n_monitoring=1)
+
+    rows = []
+    prev_err = None
+    for N in Ns:
+        hp = _pricer(N)
+        V_N = hp.price(frequency="continuous", n_monitoring=1)
+        err = abs(V_N - V_ref)
+        ratio = prev_err / err if (prev_err is not None and err > 0) else float("nan")
+        rows.append({"N": N, "h": hp.h, "V_N": V_N, "error": err,
+                     "error_ratio": ratio})
+        prev_err = err
+
+    df = pd.DataFrame(rows)
+    df.attrs["V_ref"] = V_ref
+    df.attrs["N_ref"] = N_ref
+    df.to_csv(f"{TAB_DIR}/experiment3b_M1_convergence.csv", index=False)
+
+    # ---- figure: M=1 vs M=252 error curves on the same log-log axes ----
+    # recompute M=252 errors on the same nested domain for a clean comparison
+    V_ref_daily = _pricer(N_ref).price(frequency="daily")
+    errs_daily = []
+    for N in Ns:
+        V_N = _pricer(N).price(frequency="daily")
+        errs_daily.append(abs(V_N - V_ref_daily))
+
+    hs = df["h"].values
+    errs_M1 = df["error"].values
+
+    # reference O(h^2) slope anchored to first point of M=1 curve
+    h_fit = np.array([hs[0], hs[-1]])
+    ref_slope = errs_M1[0] * (h_fit / hs[0]) ** 2
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.loglog(hs, errs_M1, "o-", label="M=1 (single monitoring date)")
+    ax.loglog(hs, errs_daily, "s--", label="M=252 (daily monitoring)")
+    ax.loglog(h_fit, ref_slope, "k:", label=r"Reference slope $O(h^2)$")
+    ax.set_xlabel("mesh size h")
+    ax.set_ylabel(r"$|V_N - V_{ref}|$")
+    ax.set_title("Spatial convergence: M=1 vs M=252")
+    ax.legend()
+    ax.invert_xaxis()
+    _savefig(fig, "experiment3b_M1_vs_daily_convergence")
 
     return df
