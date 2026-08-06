@@ -10,6 +10,12 @@ to reproduce the qualitative scaling and approximate figure shapes.
 
 ## Stage 1 - Paper experiments
 
+The paper grid remains the strict reproduction baseline. Two extensions keep the
+same 37-core QTT shape: a uniform log-moneyness coordinate and a sinh-adaptive
+log-moneyness coordinate concentrated at ATM, with a quadratic maturity grid.
+Every European run reports an oracle grid interpolator so TT-cross error can be
+separated from irreducible off-grid interpolation error.
+
 ### European geometric basket put
 
 - Inputs: `(S1, S2, S3, S4, S5, K, r, T)`.
@@ -85,4 +91,3 @@ Two portfolio constructions are tested separately:
 
 The second construction must be rebuilt after position changes, so the operational
 break-even point is part of the result rather than assumed.
-

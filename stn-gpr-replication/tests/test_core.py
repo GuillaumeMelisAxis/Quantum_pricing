@@ -4,6 +4,11 @@ import numpy as np
 
 from stngpr.baselines import ManhattanLaplacian
 from stngpr.config import PaperConfig
+from stngpr.coordinates import (
+    CoordinateTransform,
+    build_coordinate_grid,
+    oracle_multilinear_predict,
+)
 from stngpr.grids import QTTGrid
 from stngpr.pricers import geometric_basket_put
 from stngpr.risk import var_es
@@ -24,6 +29,25 @@ class GridTests(unittest.TestCase):
         self.assertEqual(corners.shape, (1, 4, 2))
         self.assertAlmostEqual(float(weights.sum()), 1.0)
 
+    def test_nonuniform_grid_interpolates_linear_function_exactly(self):
+        grid = QTTGrid(axes=(np.array([0.0, 0.1, 0.4, 1.0]), np.array([0.0, 0.2, 1.0, 3.0])))
+        points = np.array([[0.25, 0.7], [0.9, 2.4]])
+        pricer = lambda x: 2.0 + 3.0 * x[:, 0] - 0.5 * x[:, 1]
+        predicted = oracle_multilinear_predict(grid, pricer, points)
+        np.testing.assert_allclose(predicted, pricer(points), atol=1e-14)
+
+    def test_adaptive_grid_concentrates_moneyness_nodes_at_atm(self):
+        config = PaperConfig()
+        grid, _, description = build_coordinate_grid(
+            config, "moneyness_adaptive", "geometric"
+        )
+        m_axis = grid.axes[config.n_assets]
+        self.assertEqual(m_axis.size, 64)
+        uniform_step = (m_axis[-1] - m_axis[0]) / (m_axis.size - 1)
+        atm_step = np.diff(m_axis)[np.argmin(np.abs(m_axis[:-1]))]
+        self.assertLess(atm_step, uniform_step / 2.0)
+        self.assertEqual(description["mode"], "moneyness_adaptive")
+
 
 class PricingTests(unittest.TestCase):
     def test_one_asset_reduces_to_black_scholes_put(self):
@@ -39,6 +63,16 @@ class PricingTests(unittest.TestCase):
             config.volatilities, config.correlation,
         )
         self.assertTrue(np.all(prices >= 0.0))
+
+    def test_moneyness_coordinate_round_trip(self):
+        transform = CoordinateTransform(5, "geometric", True)
+        market = np.array([
+            [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 1.2],
+            [20.0, 30.0, 40.0, 50.0, 60.0, 35.0, 0.01, 0.2],
+        ])
+        np.testing.assert_allclose(
+            transform.to_market(transform.to_model(market)), market, rtol=1e-14
+        )
 
 
 class RiskTests(unittest.TestCase):

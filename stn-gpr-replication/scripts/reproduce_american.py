@@ -9,7 +9,7 @@ import numpy as np
 
 from stngpr.baselines import ExactLaplacianGPR
 from stngpr.config import PaperConfig
-from stngpr.grids import QTTGrid
+from stngpr.coordinates import GRID_MODES, TransformedPricer, build_coordinate_grid
 from stngpr.pricers import AmericanArithmeticBasketLSMC
 from stngpr.tt_surrogate import TTPriceSurrogate
 
@@ -116,24 +116,30 @@ def evaluate_predictions(config, x_test, y_test, predictions):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=PROFILES, default="smoke")
+    parser.add_argument("--grid-mode", choices=GRID_MODES, default="paper")
     parser.add_argument(
-        "--output", type=Path, default=Path("results/american.json")
+        "--output", type=Path, default=None
     )
     args = parser.parse_args()
     profile = PROFILES[args.profile]
+    output = args.output or Path(f"results/american_{args.grid_mode}.json")
 
     config = PaperConfig()
     rng = np.random.default_rng(config.seed + 1)
-    grid = QTTGrid(config.bounds, config.physical_shape)
-    pricer = AmericanArithmeticBasketLSMC(
+    grid, transform, grid_description = build_coordinate_grid(
+        config, args.grid_mode, basket_kind="arithmetic"
+    )
+    market_pricer = AmericanArithmeticBasketLSMC(
         config,
         n_paths=profile["paths"],
         n_steps=profile["steps"],
     )
+    model_pricer = TransformedPricer(market_pricer, transform)
 
     x_test = uniform_points(config, profile["test"], rng)
+    model_x_test = transform.to_model(x_test)
     start = perf_counter()
-    y_test = pricer(x_test)
+    y_test = market_pricer(x_test)
     test_label_generation_time = perf_counter() - start
 
     results = {
@@ -147,6 +153,7 @@ def main():
             "grid": list(config.physical_shape),
             "qtt_cores": len(config.qtt_shape),
             "test_size": int(profile["test"]),
+            "coordinate_grid": grid_description,
         },
         "test_label_generation_time": test_label_generation_time,
         "tt": [],
@@ -154,7 +161,7 @@ def main():
     }
 
     for budget in profile["budgets"]:
-        model = TTPriceSurrogate(grid, pricer, seed=config.seed)
+        model = TTPriceSurrogate(grid, model_pricer, seed=config.seed)
         total_start = perf_counter()
         diag = model.fit(
             budget,
@@ -165,7 +172,7 @@ def main():
         initialization_time = max(training_total_time - diag.wall_time, 0.0)
 
         inference_start = perf_counter()
-        predictions = model.predict(x_test)
+        predictions = model.predict(model_x_test)
         inference_total_time = perf_counter() - inference_start
         metrics = evaluate_predictions(
             config, x_test, y_test, predictions
@@ -186,19 +193,20 @@ def main():
 
     for n_train in profile["gpr"]:
         x_train = uniform_points(config, n_train, rng)
+        model_x_train = transform.to_model(x_train)
         total_start = perf_counter()
         label_start = perf_counter()
-        y_train = pricer(x_train)
+        y_train = market_pricer(x_train)
         label_generation_time = perf_counter() - label_start
         fit_start = perf_counter()
         model = ExactLaplacianGPR(
             optimize=True, seed=config.seed
-        ).fit(x_train, y_train)
+        ).fit(model_x_train, y_train)
         model_fit_time = perf_counter() - fit_start
         training_total_time = perf_counter() - total_start
 
         inference_start = perf_counter()
-        predictions = model.predict(x_test)
+        predictions = model.predict(model_x_test)
         inference_total_time = perf_counter() - inference_start
         metrics = evaluate_predictions(
             config, x_test, y_test, predictions
@@ -214,8 +222,8 @@ def main():
             "metrics": metrics,
         })
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(json.dumps(results, indent=2))
 
 

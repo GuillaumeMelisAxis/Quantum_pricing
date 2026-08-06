@@ -28,9 +28,33 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
 python scripts/reproduce_european.py --profile smoke
+python scripts/reproduce_european.py --profile intermediate
 python scripts/reproduce_european.py --profile paper
+python scripts/reproduce_american.py --profile intermediate
 python -m pytest
 ```
+
+Grid experiments preserve the same QTT shape and are selected independently:
+
+```bash
+python scripts/reproduce_european.py --profile intermediate --grid-mode paper
+python scripts/reproduce_european.py --profile intermediate --grid-mode moneyness_uniform
+python scripts/reproduce_european.py --profile intermediate --grid-mode moneyness_adaptive
+```
+
+The interpolation floor can be compared in a few seconds, without TT/GPR fits:
+
+```bash
+python scripts/reproduce_european.py --profile intermediate --grid-mode paper --oracle-only
+python scripts/reproduce_european.py --profile intermediate --grid-mode moneyness_uniform --oracle-only
+python scripts/reproduce_european.py --profile intermediate --grid-mode moneyness_adaptive --oracle-only
+```
+
+`moneyness_adaptive` uses an asymmetric hyperbolic-sine map calibrated to
+concentrate nodes around `log(K / basket_spot) = 0` while retaining adequate
+tail resolution, and a quadratic maturity grid near expiry. The European JSON
+also reports `oracle_interpolation`: the irreducible
+multilinear interpolation error of the selected grid before TT-cross error.
 
 The `smoke` profile validates the complete pipeline with a small pricing budget.
 The `paper` profile uses the paper grid and should be run on a machine with ample
