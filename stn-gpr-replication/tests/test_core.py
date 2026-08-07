@@ -12,6 +12,13 @@ from stngpr.coordinates import (
 from stngpr.grids import QTTGrid
 from stngpr.pricers import geometric_basket_put
 from stngpr.risk import var_es
+from stngpr.validation import (
+    american_put_binomial,
+    black_scholes_put,
+    error_metrics,
+    scalar_summary,
+    stratified_american_points,
+)
 
 
 class GridTests(unittest.TestCase):
@@ -48,6 +55,23 @@ class GridTests(unittest.TestCase):
         self.assertLess(atm_step, uniform_step / 2.0)
         self.assertEqual(description["mode"], "moneyness_adaptive")
 
+    def test_grid_ablation_changes_one_axis_at_a_time(self):
+        config = PaperConfig()
+        paper, _, _ = build_coordinate_grid(config, "paper", "arithmetic")
+        paper_t, _, _ = build_coordinate_grid(
+            config, "paper_adaptive_maturity", "arithmetic"
+        )
+        money_t, _, _ = build_coordinate_grid(
+            config, "moneyness_adaptive", "arithmetic"
+        )
+        money_u, _, _ = build_coordinate_grid(
+            config, "moneyness_adaptive_uniform_maturity", "arithmetic"
+        )
+        np.testing.assert_allclose(paper.axes[config.n_assets], paper_t.axes[config.n_assets])
+        np.testing.assert_allclose(paper_t.axes[-1], money_t.axes[-1])
+        np.testing.assert_allclose(paper.axes[-1], money_u.axes[-1])
+        self.assertFalse(np.allclose(paper.axes[-1], paper_t.axes[-1]))
+
 
 class PricingTests(unittest.TestCase):
     def test_one_asset_reduces_to_black_scholes_put(self):
@@ -73,6 +97,39 @@ class PricingTests(unittest.TestCase):
         np.testing.assert_allclose(
             transform.to_market(transform.to_model(market)), market, rtol=1e-14
         )
+
+    def test_american_binomial_respects_basic_bounds(self):
+        value = american_put_binomial(100.0, 100.0, 0.03, 0.2, 1.0, steps=500)
+        european = black_scholes_put(100.0, 100.0, 0.03, 0.2, 1.0)
+        self.assertGreaterEqual(value, european - 1e-10)
+        self.assertGreaterEqual(value, 0.0)
+
+    def test_stratified_american_design_is_balanced_and_in_bounds(self):
+        config = PaperConfig()
+        points, labels = stratified_american_points(
+            config, 3, np.random.default_rng(11)
+        )
+        self.assertEqual(points.shape, (15, config.n_assets + 3))
+        counts = {name: sum(label[0] == name for label in labels) for name in {
+            label[0] for label in labels
+        }}
+        self.assertTrue(all(count == 3 for count in counts.values()))
+        for column, (lower, upper) in enumerate(config.bounds):
+            self.assertTrue(np.all(points[:, column] >= lower))
+            self.assertTrue(np.all(points[:, column] <= upper))
+
+    def test_error_metrics_zero_error(self):
+        metrics = error_metrics([1.0, 2.0], [1.0, 2.0])
+        self.assertEqual(metrics["mae"], 0.0)
+        self.assertEqual(metrics["rmse"], 0.0)
+
+    def test_scalar_summary(self):
+        summary = scalar_summary([1.0, 2.0, 3.0])
+        self.assertEqual(summary["count"], 3)
+        self.assertEqual(summary["mean"], 2.0)
+        self.assertEqual(summary["median"], 2.0)
+        self.assertEqual(summary["min"], 1.0)
+        self.assertEqual(summary["max"], 3.0)
 
 
 class RiskTests(unittest.TestCase):

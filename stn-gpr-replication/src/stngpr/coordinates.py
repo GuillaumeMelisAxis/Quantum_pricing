@@ -7,7 +7,13 @@ import numpy as np
 from .grids import QTTGrid, short_maturity_axis, sinh_centered_axis
 
 
-GRID_MODES = ("paper", "moneyness_uniform", "moneyness_adaptive")
+GRID_MODES = (
+    "paper",
+    "paper_adaptive_maturity",
+    "moneyness_uniform",
+    "moneyness_adaptive_uniform_maturity",
+    "moneyness_adaptive",
+)
 
 
 @dataclass(frozen=True)
@@ -55,14 +61,30 @@ def build_coordinate_grid(config, mode: str, basket_kind: str):
     transform = CoordinateTransform(
         n_assets=config.n_assets,
         basket_kind=basket_kind,
-        use_moneyness=mode != "paper",
+        use_moneyness=mode.startswith("moneyness"),
     )
-    if mode == "paper":
-        grid = QTTGrid(config.bounds, config.physical_shape)
+    if mode in ("paper", "paper_adaptive_maturity"):
+        if mode == "paper":
+            maturity_axis = np.linspace(
+                *config.maturity_bounds, config.physical_shape[-1]
+            )
+            maturity_nodes = "uniform"
+        else:
+            maturity_axis = short_maturity_axis(
+                *config.maturity_bounds, config.physical_shape[-1], power=2.0
+            )
+            maturity_nodes = "quadratic near T_min"
+        axes = [
+            np.linspace(a, b, size)
+            for (a, b), size in zip(config.bounds, config.physical_shape)
+        ]
+        axes[-1] = maturity_axis
+        grid = QTTGrid(axes=axes)
         return grid, transform, {
             "mode": mode,
             "strike_coordinate": "strike",
-            "maturity_nodes": "uniform",
+            "maturity_nodes": maturity_nodes,
+            "maturity_axis": maturity_axis.tolist(),
         }
 
     spot_min, spot_max = config.spot_bounds
@@ -75,19 +97,21 @@ def build_coordinate_grid(config, mode: str, basket_kind: str):
     ]
     if mode == "moneyness_uniform":
         m_axis = np.linspace(m_min, m_max, config.physical_shape[config.n_assets])
-        maturity_axis = np.linspace(
-            *config.maturity_bounds, config.physical_shape[-1]
-        )
         moneyness_nodes = "uniform"
-        maturity_nodes = "uniform"
     else:
         m_axis = sinh_centered_axis(
             m_min, m_max, config.physical_shape[config.n_assets], concentration=3.0
         )
+        moneyness_nodes = "asymmetric sinh concentration=3 around zero"
+    if mode in ("moneyness_uniform", "moneyness_adaptive_uniform_maturity"):
+        maturity_axis = np.linspace(
+            *config.maturity_bounds, config.physical_shape[-1]
+        )
+        maturity_nodes = "uniform"
+    else:
         maturity_axis = short_maturity_axis(
             *config.maturity_bounds, config.physical_shape[-1], power=2.0
         )
-        moneyness_nodes = "asymmetric sinh concentration=3 around zero"
         maturity_nodes = "quadratic near T_min"
     axes.extend((
         m_axis,

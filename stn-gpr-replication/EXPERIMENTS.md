@@ -34,6 +34,20 @@ separated from irreducible off-grid interpolation error.
 - Robustness run: independent seeds and repeated labels to measure noise floor.
 - Compare TT and GPR at equal black-box call budgets as well as equal wall time.
 
+### Final American grid robustness gate
+
+- Compare `moneyness_adaptive_uniform_maturity` and `moneyness_adaptive` on the
+  same 200 stratified test points.
+- Repeat every budget (7,500, 9,000 and 12,000 evaluations) with five paired TT
+  initialization seeds.
+- Keep the LSMC oracle, test points and independent reference identical across
+  the paired runs.
+- Report mean, standard deviation, median, minimum and maximum MAE across seeds,
+  together with ATM MAE, rank and paired adaptive-grid win rate.
+- Accept the adaptive maturity refinement as robust only if it wins for at least
+  four seeds out of five at 9,000 and 12,000 evaluations, has positive mean
+  paired improvement, and its worst-seed MAE is no more than twice its median.
+
 ## Stage 2 - Greeks
 
 The trusted and surrogate pricers are bumped with identical central-difference
