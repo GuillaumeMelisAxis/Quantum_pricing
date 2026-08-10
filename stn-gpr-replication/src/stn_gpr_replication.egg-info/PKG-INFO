@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: stn-gpr-replication
+Version: 0.6.0
+Summary: Reproducible implementation and extensions of the STN-GPR option-pricing framework
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.26
+Requires-Dist: scipy>=1.11
+Requires-Dist: pandas>=2.0
+Requires-Dist: scikit-learn>=1.3
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: teneva==0.14.11
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"

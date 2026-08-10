@@ -102,6 +102,20 @@ CPU time. TT-cross never materializes the full 137.4-billion-entry tensor.
 
 The complete validation design is in [`EXPERIMENTS.md`](EXPERIMENTS.md).
 
+## Publication figures
+
+Generate the analytical geometric-basket convexity heat maps with the actual
+uniform and adaptive QTT nodes overlaid:
+
+```bash
+python scripts/figures/plot_convexity_heatmaps.py --output-dir figures
+```
+
+The command writes both `figures/convexity-grid-comparison.png` and
+`figures/convexity-grid-comparison.pdf`. The color field is the scale-invariant
+strike-convexity indicator `(K^2 / B0) * d2V/dK2`; the dashed curve is its
+analytical maximum as a function of maturity.
+
 ## Experimental roadmap
 
 1. Match the European error/training-budget curves.

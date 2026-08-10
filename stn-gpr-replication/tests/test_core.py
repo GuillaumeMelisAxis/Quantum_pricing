@@ -9,6 +9,11 @@ from stngpr.coordinates import (
     build_coordinate_grid,
     oracle_multilinear_predict,
 )
+from stngpr.diagnostics import (
+    geometric_basket_convexity_ridge,
+    geometric_basket_effective_parameters,
+    geometric_basket_log_moneyness_convexity,
+)
 from stngpr.grids import QTTGrid
 from stngpr.pricers import geometric_basket_put
 from stngpr.risk import var_es
@@ -87,6 +92,26 @@ class PricingTests(unittest.TestCase):
             config.volatilities, config.correlation,
         )
         self.assertTrue(np.all(prices >= 0.0))
+
+    def test_geometric_convexity_is_positive_and_peaks_on_ridge(self):
+        config = PaperConfig()
+        rate = 0.03
+        basket_sigma, basket_carry = geometric_basket_effective_parameters(
+            rate,
+            config.volatilities,
+            config.correlation,
+            config.dividends,
+        )
+        maturity = 0.5
+        expected_peak = float(geometric_basket_convexity_ridge(
+            maturity, basket_sigma, basket_carry
+        ))
+        m = np.linspace(expected_peak - 0.5, expected_peak + 0.5, 20_001)
+        chi = geometric_basket_log_moneyness_convexity(
+            m, maturity, rate, basket_sigma, basket_carry
+        )
+        self.assertTrue(np.all(chi >= 0.0))
+        self.assertAlmostEqual(float(m[np.argmax(chi)]), expected_peak, places=4)
 
     def test_moneyness_coordinate_round_trip(self):
         transform = CoordinateTransform(5, "geometric", True)
