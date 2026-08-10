@@ -116,6 +116,17 @@ The command writes both `figures/convexity-grid-comparison.png` and
 strike-convexity indicator `(K^2 / B0) * d2V/dK2`; the dashed curve is its
 analytical maximum as a function of maturity.
 
+Generate the computational-coordinate map and the local cell widths of the
+hyperbolic-sine log-moneyness discretization:
+
+```bash
+python scripts/figures/plot_sinh_discretization.py --output-dir figures
+```
+
+The command writes `figures/sinh-moneyness-discretization.png` and
+`figures/sinh-moneyness-discretization.pdf`. By default it uses the same
+64-node axis and concentration parameter `gamma=3` as the experiments.
+
 ## Experimental roadmap
 
 1. Match the European error/training-budget curves.

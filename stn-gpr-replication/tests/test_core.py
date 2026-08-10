@@ -14,7 +14,7 @@ from stngpr.diagnostics import (
     geometric_basket_effective_parameters,
     geometric_basket_log_moneyness_convexity,
 )
-from stngpr.grids import QTTGrid
+from stngpr.grids import QTTGrid, sinh_centered_axis
 from stngpr.pricers import geometric_basket_put
 from stngpr.risk import var_es
 from stngpr.validation import (
@@ -59,6 +59,20 @@ class GridTests(unittest.TestCase):
         atm_step = np.diff(m_axis)[np.argmin(np.abs(m_axis[:-1]))]
         self.assertLess(atm_step, uniform_step / 2.0)
         self.assertEqual(description["mode"], "moneyness_adaptive")
+
+    def test_sinh_grid_atm_cell_matches_analytical_ratio(self):
+        lower, upper, n_nodes, concentration = -5.0, 3.7, 64, 3.0
+        axis = sinh_centered_axis(lower, upper, n_nodes, concentration)
+        uniform_width = (upper - lower) / (n_nodes - 1)
+        atm_width = axis[n_nodes // 2] - axis[n_nodes // 2 - 1]
+        expected_ratio = (
+            (n_nodes - 1)
+            * np.sinh(concentration / (n_nodes - 1))
+            / np.sinh(concentration)
+        )
+        np.testing.assert_allclose(atm_width / uniform_width, expected_ratio)
+        self.assertTrue(np.all(np.diff(axis[: n_nodes // 2]) > 0.0))
+        self.assertTrue(np.all(np.diff(axis[n_nodes // 2 :]) > 0.0))
 
     def test_grid_ablation_changes_one_axis_at_a_time(self):
         config = PaperConfig()
