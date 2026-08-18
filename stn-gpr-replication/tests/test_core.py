@@ -17,7 +17,10 @@ from stngpr.diagnostics import (
     geometric_basket_effective_parameters,
     geometric_basket_log_moneyness_convexity,
 )
-from stngpr.greeks import finite_difference_greeks
+from stngpr.greeks import (
+    finite_difference_greeks,
+    geometric_basket_put_spot_greeks,
+)
 from stngpr.grids import QTTGrid, sinh_centered_axis
 from stngpr.pricers import geometric_basket_put
 from stngpr.risk import var_es
@@ -238,6 +241,16 @@ class GreekTests(unittest.TestCase):
             spot_columns=(0, 1, 2),
             relative_bump=1e-3,
         )
+        analytical_delta, analytical_gamma = (
+            geometric_basket_put_spot_greeks(
+                spots[None, :],
+                [strike],
+                [rate],
+                [maturity],
+                volatilities,
+                correlation,
+            )
+        )
 
         covariance = np.outer(volatilities, volatilities) * correlation
         basket_variance = float(weights @ covariance @ weights)
@@ -265,6 +278,12 @@ class GreekTests(unittest.TestCase):
 
         basket_first = weights * basket / spots
         expected_delta = basket_delta * basket_first
+        np.testing.assert_allclose(
+            analytical_delta[0],
+            expected_delta,
+            rtol=1e-13,
+            atol=1e-14,
+        )
         for i in range(3):
             np.testing.assert_allclose(
                 result["delta"][i],
@@ -278,6 +297,12 @@ class GreekTests(unittest.TestCase):
             expected = (
                 basket_gamma * basket_first[i] ** 2
                 + basket_delta * basket_second
+            )
+            np.testing.assert_allclose(
+                analytical_gamma[0, i, i],
+                expected,
+                rtol=1e-13,
+                atol=1e-14,
             )
             np.testing.assert_allclose(
                 result["gamma"][(i, i)],
@@ -294,6 +319,12 @@ class GreekTests(unittest.TestCase):
                 expected = (
                     basket_gamma * basket_first[i] * basket_first[j]
                     + basket_delta * basket_mixed
+                )
+                np.testing.assert_allclose(
+                    analytical_gamma[0, i, j],
+                    expected,
+                    rtol=1e-13,
+                    atol=1e-14,
                 )
                 np.testing.assert_allclose(
                     result["gamma"][(i, j)],
