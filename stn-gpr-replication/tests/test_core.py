@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import numpy as np
@@ -6,6 +7,8 @@ from stngpr.baselines import ManhattanLaplacian
 from stngpr.config import PaperConfig
 from stngpr.coordinates import (
     CoordinateTransform,
+    MarketCoordinatePricer,
+    TransformedPricer,
     build_coordinate_grid,
     oracle_multilinear_predict,
 )
@@ -14,6 +17,7 @@ from stngpr.diagnostics import (
     geometric_basket_effective_parameters,
     geometric_basket_log_moneyness_convexity,
 )
+from stngpr.greeks import finite_difference_greeks
 from stngpr.grids import QTTGrid, sinh_centered_axis
 from stngpr.pricers import geometric_basket_put
 from stngpr.risk import var_es
@@ -176,6 +180,143 @@ class RiskTests(unittest.TestCase):
         var, es = var_es(np.arange(100.0), 0.95)
         self.assertEqual(var, 95.0)
         self.assertGreaterEqual(es, var)
+
+
+class GreekTests(unittest.TestCase):
+    def test_market_coordinate_greeks_hold_strike_fixed(self):
+        transform = CoordinateTransform(2, "arithmetic", True)
+
+        def market_pricer(parameters):
+            x = np.atleast_2d(np.asarray(parameters, dtype=float))
+            s1, s2, strike = x[:, 0], x[:, 1], x[:, 2]
+            return s1**2 + 3.0 * s1 * s2 + 0.5 * s2**2 + strike * s1
+
+        model_pricer = TransformedPricer(market_pricer, transform)
+        market_adapter = MarketCoordinatePricer(model_pricer, transform)
+        x = np.array([80.0, 120.0, 105.0, 0.03, 1.0])
+        result = finite_difference_greeks(
+            market_adapter,
+            x,
+            spot_columns=(0, 1),
+            relative_bump=1e-3,
+        )
+
+        expected_delta = {
+            0: 2.0 * x[0] + 3.0 * x[1] + x[2],
+            1: 3.0 * x[0] + x[1],
+        }
+        expected_gamma = {(0, 0): 2.0, (1, 1): 1.0, (0, 1): 3.0}
+        for column, expected in expected_delta.items():
+            self.assertAlmostEqual(result["delta"][column], expected, places=8)
+        for columns, expected in expected_gamma.items():
+            self.assertAlmostEqual(result["gamma"][columns], expected, places=8)
+        self.assertAlmostEqual(result["gamma"][(1, 0)], 3.0, places=8)
+
+    def test_geometric_basket_greeks_match_closed_form_derivatives(self):
+        spots = np.array([80.0, 95.0, 110.0])
+        strike, rate, maturity = 100.0, 0.03, 0.8
+        volatilities = np.array([0.18, 0.22, 0.25])
+        correlation = np.full((3, 3), 0.25)
+        np.fill_diagonal(correlation, 1.0)
+        weights = np.full(3, 1.0 / 3.0)
+
+        def pricer(parameters):
+            x = np.atleast_2d(np.asarray(parameters, dtype=float))
+            return geometric_basket_put(
+                x[:, :3],
+                x[:, 3],
+                x[:, 4],
+                x[:, 5],
+                volatilities,
+                correlation,
+            )
+
+        x = np.concatenate((spots, [strike, rate, maturity]))
+        result = finite_difference_greeks(
+            pricer,
+            x,
+            spot_columns=(0, 1, 2),
+            relative_bump=1e-3,
+        )
+
+        covariance = np.outer(volatilities, volatilities) * correlation
+        basket_variance = float(weights @ covariance @ weights)
+        basket_sigma = np.sqrt(basket_variance)
+        basket = float(np.exp(np.log(spots) @ weights))
+        carry = (
+            rate
+            - 0.5 * float(weights @ volatilities**2)
+            + 0.5 * basket_variance
+        )
+        std = basket_sigma * np.sqrt(maturity)
+        d1 = (
+            np.log(basket / strike)
+            + (carry + 0.5 * basket_variance) * maturity
+        ) / std
+        normal_cdf_minus_d1 = 0.5 * (
+            1.0 + math.erf(-d1 / np.sqrt(2.0))
+        )
+        normal_density_d1 = np.exp(-0.5 * d1**2) / np.sqrt(2.0 * np.pi)
+        discount_carry = np.exp((carry - rate) * maturity)
+        basket_delta = -discount_carry * normal_cdf_minus_d1
+        basket_gamma = (
+            discount_carry * normal_density_d1 / (basket * std)
+        )
+
+        basket_first = weights * basket / spots
+        expected_delta = basket_delta * basket_first
+        for i in range(3):
+            np.testing.assert_allclose(
+                result["delta"][i],
+                expected_delta[i],
+                rtol=1e-6,
+                atol=1e-9,
+            )
+            basket_second = (
+                weights[i] * (weights[i] - 1.0) * basket / spots[i] ** 2
+            )
+            expected = (
+                basket_gamma * basket_first[i] ** 2
+                + basket_delta * basket_second
+            )
+            np.testing.assert_allclose(
+                result["gamma"][(i, i)],
+                expected,
+                rtol=2e-5,
+                atol=1e-8,
+            )
+
+        for i in range(3):
+            for j in range(i + 1, 3):
+                basket_mixed = (
+                    weights[i] * weights[j] * basket / (spots[i] * spots[j])
+                )
+                expected = (
+                    basket_gamma * basket_first[i] * basket_first[j]
+                    + basket_delta * basket_mixed
+                )
+                np.testing.assert_allclose(
+                    result["gamma"][(i, j)],
+                    expected,
+                    rtol=2e-5,
+                    atol=1e-8,
+                )
+
+    def test_greek_input_validation(self):
+        pricer = lambda x: np.sum(x, axis=1)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            finite_difference_greeks(
+                pricer,
+                np.array([100.0, 90.0]),
+                spot_columns=(0,),
+                relative_bump=0.0,
+            )
+        with self.assertRaisesRegex(ValueError, "unique"):
+            finite_difference_greeks(
+                pricer,
+                np.array([100.0, 90.0]),
+                spot_columns=(0, 0),
+            )
 
 
 class KernelTests(unittest.TestCase):

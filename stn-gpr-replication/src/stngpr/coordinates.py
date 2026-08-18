@@ -55,6 +55,31 @@ class TransformedPricer:
         return self.market_pricer(self.transform.to_market(model_parameters))
 
 
+class MarketCoordinatePricer:
+    """Expose a model-coordinate pricer through market coordinates.
+
+    The wrapped pricer accepts (S_1, ..., S_d, m, r, T), while this adapter
+    accepts (S_1, ..., S_d, K, r, T). Recomputing log-moneyness after every
+    market-space bump is essential for spot Greeks defined at fixed strike.
+    """
+
+    def __init__(self, model_pricer, transform: CoordinateTransform):
+        self.model_pricer = model_pricer
+        self.transform = transform
+
+    def __call__(self, market_parameters: np.ndarray) -> np.ndarray:
+        market = np.atleast_2d(np.asarray(market_parameters, dtype=float))
+        values = np.asarray(
+            self.model_pricer(self.transform.to_model(market)),
+            dtype=float,
+        ).reshape(-1)
+        if values.size != market.shape[0]:
+            raise ValueError(
+                "model_pricer must return one value per parameter vector"
+            )
+        return values
+
+
 def build_coordinate_grid(config, mode: str, basket_kind: str):
     if mode not in GRID_MODES:
         raise ValueError(f"unknown grid mode: {mode}")
