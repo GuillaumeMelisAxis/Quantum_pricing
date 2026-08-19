@@ -4,6 +4,35 @@ import numpy as np
 from scipy.special import ndtr
 
 
+def project_symmetric_matrix_psd(
+    matrices: np.ndarray,
+    eigenvalue_floor: float = 0.0,
+) -> np.ndarray:
+    """Project symmetric matrices onto the positive-semidefinite cone.
+
+    The projection is the unique nearest positive-semidefinite matrix in the
+    Frobenius norm. If the true Hessian is positive semidefinite, this operation
+    cannot increase its Frobenius distance from an estimated Hessian.
+    """
+    matrices = np.asarray(matrices, dtype=float)
+    if matrices.ndim < 2 or matrices.shape[-1] != matrices.shape[-2]:
+        raise ValueError("matrices must have square trailing dimensions")
+    if not np.all(np.isfinite(matrices)):
+        raise ValueError("matrices must contain only finite values")
+    if eigenvalue_floor < 0.0:
+        raise ValueError("eigenvalue_floor must be nonnegative")
+
+    symmetric = 0.5 * (matrices + np.swapaxes(matrices, -1, -2))
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    clipped = np.maximum(eigenvalues, float(eigenvalue_floor))
+    return np.einsum(
+        "...ik,...k,...jk->...ij",
+        eigenvectors,
+        clipped,
+        eigenvectors,
+    )
+
+
 def geometric_basket_put_spot_greeks(
     spots: np.ndarray,
     strikes: np.ndarray,

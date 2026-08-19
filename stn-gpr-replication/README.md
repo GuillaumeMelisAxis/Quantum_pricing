@@ -181,6 +181,28 @@ maturity resolution, the moneyness resolution, or their interaction. The JSON
 contains global, conditional and pointwise metrics, together with the local
 ratio `Delta m_ATM / (sigma_B sqrt(T))`.
 
+The same output compares the unconstrained Gamma matrix with its orthogonal
+projection onto the positive-semidefinite cone. The projection clips negative
+eigenvalues, reports all convexity violations before and after correction, and
+retains the raw results for auditability. Use this correction only when product
+convexity in the selected market factors is theoretically justified.
+
+After selecting the refined grid, run the paired TT budget convergence test:
+
+    python scripts/validation/validate_refined_tt_greeks.py \
+        --moneyness-nodes 512 \
+        --maturity-nodes 64 \
+        --budgets 20000 50000 100000 \
+        --anova-samples 2000 \
+        --replicates 3 \
+        --relative-bump 0.002
+
+The script computes the exact-grid oracle once, then fits an independent TT for
+every budget. It separates analytical error from TT-versus-grid reconstruction
+error and records raw/projected Hessian accuracy, PSD violations, TT rank,
+function evaluations, sweeps and timings. The JSON is checkpointed after the
+oracle and after every completed budget.
+
 ## Publication figures
 
 Generate the analytical geometric-basket convexity heat maps with the actual

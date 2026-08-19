@@ -81,6 +81,30 @@ special summaries for the seven-day ATM layer. It also records
 resolution from the structural inability of a maturity-independent moneyness
 grid to resolve the shrinking short-dated convexity layer.
 
+Every estimated Gamma matrix is also projected onto the positive-semidefinite
+cone by clipping its negative eigenvalues. Raw and projected errors are both
+reported, together with negative diagonal counts, non-PSD matrix counts,
+minimum eigenvalues and Frobenius projection errors. For a contract whose true
+price is convex in the spot vector, the PSD projection is the nearest admissible
+Hessian in Frobenius norm and cannot increase its Frobenius error.
+
+Once the deterministic grid gate is passed, fit the TT directly on the selected
+`512 x 64` moneyness-maturity resolution. The paired convergence test compares
+budgets 20,000, 50,000 and 100,000 against both the analytical Greeks and the
+exact-grid oracle. It reports reconstruction-only errors separately from the
+irreducible interpolation floor and applies the same PSD projection to both
+oracle and TT Hessians.
+
+```bash
+python scripts/validation/validate_refined_tt_greeks.py \
+    --moneyness-nodes 512 \
+    --maturity-nodes 64 \
+    --budgets 20000 50000 100000 \
+    --anova-samples 2000 \
+    --replicates 3 \
+    --relative-bump 0.002
+```
+
 ```bash
 python scripts/validation/validate_short_maturity_greeks.py \
     --replicates 3 \

@@ -23,6 +23,7 @@ from stngpr.greeks import (
     finite_difference_greeks,
     finite_difference_hybrid_greeks,
     geometric_basket_put_spot_greeks,
+    project_symmetric_matrix_psd,
 )
 from stngpr.grids import QTTGrid, sinh_centered_axis
 from stngpr.pricers import geometric_basket_put
@@ -231,6 +232,22 @@ class RiskTests(unittest.TestCase):
 
 
 class GreekTests(unittest.TestCase):
+    def test_psd_projection_enforces_convexity_and_reduces_frobenius_error(self):
+        raw = np.array([[1.0, 2.0], [2.0, 1.0]])
+        reference = np.eye(2)
+        projected = project_symmetric_matrix_psd(raw)
+        self.assertGreaterEqual(float(np.min(np.linalg.eigvalsh(projected))), -1e-14)
+        self.assertLessEqual(
+            np.linalg.norm(projected - reference),
+            np.linalg.norm(raw - reference),
+        )
+
+    def test_psd_projection_validates_inputs(self):
+        with self.assertRaises(ValueError):
+            project_symmetric_matrix_psd(np.ones((2, 3)))
+        with self.assertRaises(ValueError):
+            project_symmetric_matrix_psd(np.eye(2), eigenvalue_floor=-1.0)
+
     def test_market_coordinate_greeks_hold_strike_fixed(self):
         transform = CoordinateTransform(2, "arithmetic", True)
 

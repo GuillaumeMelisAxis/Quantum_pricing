@@ -15,6 +15,7 @@ from stngpr.coordinates import (
     oracle_hybrid_cubic_predict,
 )
 from stngpr.pricers import EuropeanGeometricBasketPricer
+from stngpr.greeks import project_symmetric_matrix_psd
 
 from validate_european_greeks import (
     analytical_references,
@@ -190,6 +191,100 @@ def pointwise_metrics(
     return records
 
 
+def gamma_matrices(components, n_assets: int) -> np.ndarray:
+    diagonal = np.asarray(components["gamma_diagonal"], dtype=float)
+    cross = np.asarray(components["cross_gamma"], dtype=float)
+    matrices = np.zeros((diagonal.shape[0], n_assets, n_assets), dtype=float)
+    indices = np.arange(n_assets)
+    matrices[:, indices, indices] = diagonal
+    pairs = [
+        (i, j)
+        for i in range(n_assets)
+        for j in range(i + 1, n_assets)
+    ]
+    if cross.shape != (diagonal.shape[0], len(pairs)):
+        raise ValueError("invalid cross-Gamma component shape")
+    for column, (i, j) in enumerate(pairs):
+        matrices[:, i, j] = cross[:, column]
+        matrices[:, j, i] = cross[:, column]
+    return matrices
+
+
+def replace_gamma_components(components, matrices) -> dict:
+    matrices = np.asarray(matrices, dtype=float)
+    n_assets = matrices.shape[-1]
+    indices = np.arange(n_assets)
+    pairs = [
+        (i, j)
+        for i in range(n_assets)
+        for j in range(i + 1, n_assets)
+    ]
+    output = dict(components)
+    output["gamma_diagonal"] = matrices[:, indices, indices]
+    output["cross_gamma"] = np.column_stack([
+        matrices[:, i, j] for i, j in pairs
+    ])
+    return output
+
+
+def hessian_shape_diagnostics(matrices, tolerance=1e-12) -> dict:
+    matrices = np.asarray(matrices, dtype=float)
+    eigenvalues = np.linalg.eigvalsh(matrices)
+    diagonal = np.diagonal(matrices, axis1=-2, axis2=-1)
+    negative_diagonal = diagonal < -tolerance
+    negative_eigenvalues = eigenvalues < -tolerance
+    return {
+        "tolerance": tolerance,
+        "matrix_count": int(matrices.shape[0]),
+        "component_count": int(diagonal.size),
+        "negative_diagonal_count": int(np.sum(negative_diagonal)),
+        "negative_diagonal_fraction": float(np.mean(negative_diagonal)),
+        "matrices_with_negative_diagonal": int(
+            np.sum(np.any(negative_diagonal, axis=1))
+        ),
+        "negative_eigenvalue_count": int(np.sum(negative_eigenvalues)),
+        "matrices_outside_psd_cone": int(
+            np.sum(np.any(negative_eigenvalues, axis=1))
+        ),
+        "minimum_diagonal": float(np.min(diagonal)),
+        "minimum_eigenvalue": float(np.min(eigenvalues)),
+        "mean_negative_eigenvalue_mass": float(
+            np.mean(np.sum(np.maximum(-eigenvalues, 0.0), axis=1))
+        ),
+    }
+
+
+def projection_error_diagnostics(raw, projected, reference) -> dict:
+    raw = np.asarray(raw, dtype=float)
+    projected = np.asarray(projected, dtype=float)
+    reference = np.asarray(reference, dtype=float)
+    raw_error = np.linalg.norm(raw - reference, axis=(-2, -1))
+    projected_error = np.linalg.norm(projected - reference, axis=(-2, -1))
+    adjustment = np.linalg.norm(projected - raw, axis=(-2, -1))
+    reference_scale = float(
+        np.mean(np.linalg.norm(reference, axis=(-2, -1)))
+    )
+    return {
+        "mean_frobenius_adjustment": float(np.mean(adjustment)),
+        "maximum_frobenius_adjustment": float(np.max(adjustment)),
+        "raw_mean_frobenius_error": float(np.mean(raw_error)),
+        "projected_mean_frobenius_error": float(np.mean(projected_error)),
+        "raw_normalized_mean_frobenius_error": float(
+            np.mean(raw_error) / reference_scale
+        ),
+        "projected_normalized_mean_frobenius_error": float(
+            np.mean(projected_error) / reference_scale
+        ),
+        "mean_frobenius_error_reduction": float(
+            np.mean(raw_error) - np.mean(projected_error)
+        ),
+        "nonworsening_point_count": int(
+            np.sum(projected_error <= raw_error + 1e-14)
+        ),
+        "point_count": int(raw.shape[0]),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -307,6 +402,17 @@ def main():
             elapsed = perf_counter() - start
             key = f"moneyness_{n_moneyness}_maturity_{n_maturity}"
             global_metrics = component_metrics(references, estimates)
+            raw_hessian = gamma_matrices(estimates, config.n_assets)
+            reference_hessian = gamma_matrices(references, config.n_assets)
+            projected_hessian = project_symmetric_matrix_psd(raw_hessian)
+            projected_estimates = replace_gamma_components(
+                estimates,
+                projected_hessian,
+            )
+            projected_global_metrics = component_metrics(
+                references,
+                projected_estimates,
+            )
             results["configurations"][key] = {
                 "n_moneyness": n_moneyness,
                 "n_maturity": n_maturity,
@@ -321,12 +427,33 @@ def main():
                 ),
                 "wall_time_seconds": elapsed,
                 "global": global_metrics,
+                "global_psd_projected": projected_global_metrics,
                 "conditional": conditional_metrics(
                     references,
                     estimates,
                     log_moneyness,
                     maturity_days,
                 ),
+                "conditional_psd_projected": conditional_metrics(
+                    references,
+                    projected_estimates,
+                    log_moneyness,
+                    maturity_days,
+                ),
+                "hessian_shape": {
+                    "reference": hessian_shape_diagnostics(
+                        reference_hessian,
+                    ),
+                    "raw": hessian_shape_diagnostics(raw_hessian),
+                    "psd_projected": hessian_shape_diagnostics(
+                        projected_hessian,
+                    ),
+                    "projection_error": projection_error_diagnostics(
+                        raw_hessian,
+                        projected_hessian,
+                        reference_hessian,
+                    ),
+                },
                 "pointwise": pointwise_metrics(
                     references,
                     estimates,
@@ -334,13 +461,26 @@ def main():
                     maturity_days,
                     replicate_ids,
                 ),
+                "pointwise_psd_projected": pointwise_metrics(
+                    references,
+                    projected_estimates,
+                    log_moneyness,
+                    maturity_days,
+                    replicate_ids,
+                ),
             }
+            raw_negative = results["configurations"][key][
+                "hessian_shape"
+            ]["raw"]["negative_diagonal_count"]
             print(
                 f"n_m={n_moneyness:3d} n_T={n_maturity:2d} "
                 f"price={100 * global_metrics['price']['normalized_mae']:7.3f}% "
                 f"delta={100 * global_metrics['delta']['normalized_mae']:7.3f}% "
-                f"gamma={100 * global_metrics['gamma_diagonal']['normalized_mae']:7.3f}% "
-                f"cross={100 * global_metrics['cross_gamma']['normalized_mae']:7.3f}% "
+                f"gamma={100 * global_metrics['gamma_diagonal']['normalized_mae']:6.2f}%"
+                f"->{100 * projected_global_metrics['gamma_diagonal']['normalized_mae']:6.2f}% "
+                f"cross={100 * global_metrics['cross_gamma']['normalized_mae']:6.2f}%"
+                f"->{100 * projected_global_metrics['cross_gamma']['normalized_mae']:6.2f}% "
+                f"neg_diag={raw_negative:3d}->0 "
                 f"time={elapsed:7.2f}s"
             )
             args.output.write_text(
