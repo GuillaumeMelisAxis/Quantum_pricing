@@ -170,3 +170,29 @@ def oracle_multilinear_predict(grid, pricer, points, batch_size=128):
             weights * corner_values, axis=1
         )
     return predictions
+
+
+def oracle_hybrid_cubic_predict(
+    grid,
+    pricer,
+    points,
+    cubic_columns,
+    batch_size=16,
+):
+    """Exact-corner interpolation, cubic on selected axes and linear elsewhere."""
+    points = np.atleast_2d(np.asarray(points, dtype=float))
+    predictions = np.empty(len(points), dtype=float)
+    for start in range(0, len(points), batch_size):
+        batch = points[start : start + batch_size]
+        corners, weights = grid.hybrid_cubic_stencil(
+            batch,
+            cubic_columns=cubic_columns,
+        )
+        flat_indices = corners.reshape(-1, corners.shape[-1])
+        corner_points = grid.indices_to_points(flat_indices)
+        corner_values = pricer(corner_points).reshape(corners.shape[:2])
+        predictions[start : start + len(batch)] = np.sum(
+            weights * corner_values,
+            axis=1,
+        )
+    return predictions

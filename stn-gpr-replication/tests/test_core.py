@@ -10,6 +10,7 @@ from stngpr.coordinates import (
     MarketCoordinatePricer,
     TransformedPricer,
     build_coordinate_grid,
+    oracle_hybrid_cubic_predict,
     oracle_multilinear_predict,
 )
 from stngpr.diagnostics import (
@@ -19,6 +20,7 @@ from stngpr.diagnostics import (
 )
 from stngpr.greeks import (
     finite_difference_greeks,
+    finite_difference_hybrid_greeks,
     geometric_basket_put_spot_greeks,
 )
 from stngpr.grids import QTTGrid, sinh_centered_axis
@@ -54,6 +56,33 @@ class GridTests(unittest.TestCase):
         pricer = lambda x: 2.0 + 3.0 * x[:, 0] - 0.5 * x[:, 1]
         predicted = oracle_multilinear_predict(grid, pricer, points)
         np.testing.assert_allclose(predicted, pricer(points), atol=1e-14)
+
+    def test_hybrid_cubic_interpolates_cubic_linear_function_exactly(self):
+        grid = QTTGrid(axes=(
+            np.array([-1.0, -0.7, -0.2, 0.1, 0.4, 0.8, 1.3, 2.0]),
+            np.array([0.0, 0.3, 1.1, 3.0]),
+        ))
+        points = np.array([
+            [-0.45, 0.7],
+            [0.25, 1.8],
+            [1.05, 2.4],
+        ])
+
+        def pricer(x):
+            return (
+                1.0
+                + x[:, 0] ** 3
+                + 0.5 * x[:, 0] ** 2 * x[:, 1]
+                - 2.0 * x[:, 1]
+            )
+
+        predicted = oracle_hybrid_cubic_predict(
+            grid,
+            pricer,
+            points,
+            cubic_columns=(0,),
+        )
+        np.testing.assert_allclose(predicted, pricer(points), atol=2e-14)
 
     def test_adaptive_grid_concentrates_moneyness_nodes_at_atm(self):
         config = PaperConfig()
@@ -214,6 +243,41 @@ class GreekTests(unittest.TestCase):
         for columns, expected in expected_gamma.items():
             self.assertAlmostEqual(result["gamma"][columns], expected, places=8)
         self.assertAlmostEqual(result["gamma"][(1, 0)], 3.0, places=8)
+
+    def test_hybrid_greeks_hold_strike_fixed(self):
+        transform = CoordinateTransform(2, "arithmetic", True)
+
+        def market_pricer(parameters):
+            x = np.atleast_2d(np.asarray(parameters, dtype=float))
+            s1, s2, strike = x[:, 0], x[:, 1], x[:, 2]
+            return s1**2 + 3.0 * s1 * s2 + 0.5 * s2**2 + strike * s1
+
+        model_pricer = TransformedPricer(market_pricer, transform)
+
+        def exact_interpolator(model_parameters, cubic_columns):
+            return model_pricer(model_parameters)
+
+        x = np.array([80.0, 120.0, 105.0, 0.03, 1.0])
+        result = finite_difference_hybrid_greeks(
+            exact_interpolator,
+            transform,
+            x,
+            spot_columns=(0, 1),
+            relative_bump=1e-3,
+        )
+        self.assertAlmostEqual(
+            result["delta"][0],
+            2.0 * x[0] + 3.0 * x[1] + x[2],
+            places=8,
+        )
+        self.assertAlmostEqual(
+            result["delta"][1],
+            3.0 * x[0] + x[1],
+            places=8,
+        )
+        self.assertAlmostEqual(result["gamma"][(0, 0)], 2.0, places=8)
+        self.assertAlmostEqual(result["gamma"][(1, 1)], 1.0, places=8)
+        self.assertAlmostEqual(result["gamma"][(0, 1)], 3.0, places=8)
 
     def test_geometric_basket_greeks_match_closed_form_derivatives(self):
         spots = np.array([80.0, 95.0, 110.0])

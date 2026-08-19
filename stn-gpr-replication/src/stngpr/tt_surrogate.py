@@ -99,3 +99,24 @@ class TTPriceSurrogate:
             out[start : start + len(p)] = np.sum(weights * values, axis=1)
         return out
 
+    def predict_hybrid_cubic(
+        self,
+        points: np.ndarray,
+        cubic_columns,
+        batch_size: int = 16,
+    ) -> np.ndarray:
+        """Interpolate cubically on selected physical axes and linearly elsewhere."""
+        if self.cores is None:
+            raise RuntimeError("fit the surrogate first")
+        points = np.atleast_2d(np.asarray(points, dtype=float))
+        out = np.empty(len(points), dtype=float)
+        for start in range(0, len(points), batch_size):
+            batch = points[start : start + batch_size]
+            corners, weights = self.grid.hybrid_cubic_stencil(
+                batch,
+                cubic_columns=cubic_columns,
+            )
+            flat = corners.reshape(-1, corners.shape[-1])
+            values = self.predict_on_grid(flat).reshape(corners.shape[:2])
+            out[start : start + len(batch)] = np.sum(weights * values, axis=1)
+        return out

@@ -13,10 +13,12 @@ from stngpr.coordinates import (
     MarketCoordinatePricer,
     TransformedPricer,
     build_coordinate_grid,
+    oracle_hybrid_cubic_predict,
     oracle_multilinear_predict,
 )
 from stngpr.greeks import (
     finite_difference_greeks,
+    finite_difference_hybrid_greeks,
     geometric_basket_put_spot_greeks,
 )
 from stngpr.pricers import EuropeanGeometricBasketPricer
@@ -231,6 +233,45 @@ def finite_difference_arrays(pricer, points, n_assets, relative_bump):
     }
 
 
+def finite_difference_hybrid_arrays(
+    interpolator,
+    transform,
+    points,
+    n_assets,
+    relative_bump,
+):
+    records = [
+        finite_difference_hybrid_greeks(
+            interpolator,
+            transform,
+            point,
+            spot_columns=range(n_assets),
+            relative_bump=relative_bump,
+        )
+        for point in points
+    ]
+    pairs = [
+        (i, j)
+        for i in range(n_assets)
+        for j in range(i + 1, n_assets)
+    ]
+    return {
+        "price": np.array([record["price"] for record in records]),
+        "delta": np.array([
+            [record["delta"][i] for i in range(n_assets)]
+            for record in records
+        ]),
+        "gamma_diagonal": np.array([
+            [record["gamma"][(i, i)] for i in range(n_assets)]
+            for record in records
+        ]),
+        "cross_gamma": np.array([
+            [record["gamma"][pair] for pair in pairs]
+            for record in records
+        ]),
+    }
+
+
 def component_metrics(reference: dict, estimate: dict, mask=None) -> dict:
     if mask is None:
         mask = np.ones(reference["price"].shape[0], dtype=bool)
@@ -280,12 +321,13 @@ def evaluate_bumps(
     references,
     relative_bumps,
     n_assets,
+    array_builder=finite_difference_arrays,
 ):
     output = {}
     maturities = points[:, n_assets + 2]
     for relative_bump in relative_bumps:
         start = perf_counter()
-        estimate = finite_difference_arrays(
+        estimate = array_builder(
             pricer,
             points,
             n_assets,
@@ -326,7 +368,7 @@ def main():
     parser.add_argument("--profile", choices=PROFILES, default="smoke")
     parser.add_argument(
         "--stage",
-        choices=("exact", "grid", "tt", "all"),
+        choices=("exact", "grid", "grid_cubic", "tt", "tt_cubic", "all"),
         default="exact",
     )
     parser.add_argument(
@@ -431,7 +473,41 @@ def main():
             config.n_assets,
         )
 
-    if args.stage in ("tt", "all"):
+    if args.stage in ("grid_cubic", "all"):
+        def grid_hybrid_interpolator(model_parameters, cubic_columns):
+            return oracle_hybrid_cubic_predict(
+                grid,
+                model_oracle,
+                model_parameters,
+                cubic_columns=cubic_columns,
+            )
+
+        def grid_hybrid_builder(
+            interpolator,
+            evaluation_points,
+            n_assets,
+            relative_bump,
+        ):
+            return finite_difference_hybrid_arrays(
+                interpolator,
+                transform,
+                evaluation_points,
+                n_assets,
+                relative_bump,
+            )
+
+        results["grid_cubic"] = evaluate_bumps(
+            "grid_cubic",
+            grid_hybrid_interpolator,
+            points,
+            log_moneyness,
+            references,
+            args.relative_bumps,
+            config.n_assets,
+            array_builder=grid_hybrid_builder,
+        )
+
+    if args.stage in ("tt", "tt_cubic", "all"):
         model = TTPriceSurrogate(grid, model_oracle, seed=config.seed)
         fit_start = perf_counter()
         diagnostics = model.fit(
@@ -440,17 +516,7 @@ def main():
             log=args.cross_log,
         )
         fit_total_time = perf_counter() - fit_start
-        market_surrogate = MarketCoordinatePricer(model.predict, transform)
-        tt_results = evaluate_bumps(
-            "tt",
-            market_surrogate,
-            points,
-            log_moneyness,
-            references,
-            args.relative_bumps,
-            config.n_assets,
-        )
-        tt_results["fit"] = {
+        fit_results = {
             "budget": budget,
             "anova_samples": anova_samples,
             "total_time_seconds": fit_total_time,
@@ -460,7 +526,48 @@ def main():
             "stop": diagnostics.stop,
             "effective_rank": diagnostics.effective_rank,
         }
-        results["tt"] = tt_results
+
+        if args.stage in ("tt", "all"):
+            market_surrogate = MarketCoordinatePricer(model.predict, transform)
+            tt_results = evaluate_bumps(
+                "tt",
+                market_surrogate,
+                points,
+                log_moneyness,
+                references,
+                args.relative_bumps,
+                config.n_assets,
+            )
+            tt_results["fit"] = fit_results
+            results["tt"] = tt_results
+
+        if args.stage in ("tt_cubic", "all"):
+            def tt_hybrid_builder(
+                interpolator,
+                evaluation_points,
+                n_assets,
+                relative_bump,
+            ):
+                return finite_difference_hybrid_arrays(
+                    interpolator,
+                    transform,
+                    evaluation_points,
+                    n_assets,
+                    relative_bump,
+                )
+
+            tt_cubic_results = evaluate_bumps(
+                "tt_cubic",
+                model.predict_hybrid_cubic,
+                points,
+                log_moneyness,
+                references,
+                args.relative_bumps,
+                config.n_assets,
+                array_builder=tt_hybrid_builder,
+            )
+            tt_cubic_results["fit"] = fit_results
+            results["tt_cubic"] = tt_cubic_results
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(results, indent=2), encoding="utf-8")

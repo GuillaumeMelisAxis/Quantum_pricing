@@ -183,3 +183,101 @@ def finite_difference_greeks(
         "gamma": gammas,
         "bumps": bumps,
     }
+
+
+def finite_difference_hybrid_greeks(
+    interpolator,
+    transform,
+    x,
+    spot_columns,
+    relative_bump=1e-3,
+    minimum_bump=1e-6,
+):
+    """Spot Greeks using cubic interpolation only along risk-relevant axes.
+
+    For a diagonal Gamma, the selected spot axis and log-moneyness axis are
+    cubic. For a cross-Gamma, both spot axes and log-moneyness are cubic. Other
+    model coordinates remain multilinear.
+    """
+    x = np.asarray(x, dtype=float)
+    if x.ndim != 1:
+        raise ValueError("x must be one parameter vector")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("x must contain only finite values")
+    if relative_bump <= 0.0 or minimum_bump <= 0.0:
+        raise ValueError("bump sizes must be positive")
+
+    columns = tuple(int(j) for j in spot_columns)
+    if not columns or len(set(columns)) != len(columns):
+        raise ValueError("spot_columns must be non-empty and unique")
+    if any(j < 0 or j >= transform.n_assets for j in columns):
+        raise ValueError("spot column out of bounds")
+
+    bumps = {
+        j: max(abs(x[j]) * float(relative_bump), float(minimum_bump))
+        for j in columns
+    }
+    if any(x[j] - bumps[j] <= 0.0 for j in columns):
+        raise ValueError("central spot bumps must remain strictly positive")
+
+    def evaluate(market_scenarios, cubic_columns):
+        market_scenarios = np.atleast_2d(
+            np.asarray(market_scenarios, dtype=float)
+        )
+        model_scenarios = transform.to_model(market_scenarios)
+        values = np.asarray(
+            interpolator(
+                model_scenarios,
+                cubic_columns=tuple(cubic_columns),
+            ),
+            dtype=float,
+        ).reshape(-1)
+        if values.size != market_scenarios.shape[0]:
+            raise ValueError(
+                "interpolator must return one value per parameter vector"
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError("interpolator returned non-finite values")
+        return values
+
+    base_price = float(evaluate(x[None, :], ())[0])
+    moneyness_columns = (
+        (transform.n_assets,) if transform.use_moneyness else ()
+    )
+    deltas, gammas = {}, {}
+
+    for i in columns:
+        h = bumps[i]
+        up, down = x.copy(), x.copy()
+        up[i] += h
+        down[i] -= h
+        cubic = tuple(sorted({i, *moneyness_columns}))
+        base, p_up, p_down = evaluate(
+            np.vstack((x, up, down)),
+            cubic,
+        )
+        deltas[i] = (p_up - p_down) / (2.0 * h)
+        gammas[(i, i)] = (p_up - 2.0 * base + p_down) / h**2
+
+    for pos, i in enumerate(columns):
+        for j in columns[pos + 1 :]:
+            scenarios = []
+            for si, sj in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+                z = x.copy()
+                z[i] += si * bumps[i]
+                z[j] += sj * bumps[j]
+                scenarios.append(z)
+            cubic = tuple(sorted({i, j, *moneyness_columns}))
+            pp, pm, mp, mm = evaluate(np.asarray(scenarios), cubic)
+            value = (
+                (pp - pm - mp + mm)
+                / (4.0 * bumps[i] * bumps[j])
+            )
+            gammas[(i, j)] = gammas[(j, i)] = value
+
+    return {
+        "price": base_price,
+        "delta": deltas,
+        "gamma": gammas,
+        "bumps": bumps,
+    }

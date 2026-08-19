@@ -118,6 +118,66 @@ class QTTGrid:
             weights[:, c] = np.prod(np.where(selector, w_hi, 1.0 - w_hi), axis=1)
         return corners, weights
 
+    def hybrid_cubic_stencil(self, points: np.ndarray, cubic_columns=()):
+        """Tensor-product stencil, cubic on selected axes and linear elsewhere."""
+        points = np.asarray(points, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        m, d = points.shape
+        if d != len(self.shape):
+            raise ValueError("wrong point dimension")
+
+        cubic = tuple(int(j) for j in cubic_columns)
+        if len(set(cubic)) != len(cubic):
+            raise ValueError("cubic_columns must be unique")
+        if any(j < 0 or j >= d for j in cubic):
+            raise ValueError("cubic column out of bounds")
+        cubic = set(cubic)
+
+        support_indices = []
+        support_weights = []
+        for j, axis in enumerate(self.axes):
+            values = np.clip(points[:, j], axis[0], axis[-1])
+            upper = np.searchsorted(axis, values, side="right")
+            upper = np.clip(upper, 1, axis.size - 1)
+            lower = upper - 1
+
+            if j not in cubic:
+                indices = np.column_stack((lower, upper))
+                denominator = axis[upper] - axis[lower]
+                weight_upper = (values - axis[lower]) / denominator
+                weights = np.column_stack((1.0 - weight_upper, weight_upper))
+            else:
+                if axis.size < 4:
+                    raise ValueError("cubic interpolation requires four nodes")
+                start = np.clip(lower - 1, 0, axis.size - 4)
+                indices = start[:, None] + np.arange(4)[None, :]
+                nodes = axis[indices]
+                weights = np.ones((m, 4), dtype=float)
+                for a in range(4):
+                    for b in range(4):
+                        if a != b:
+                            weights[:, a] *= (
+                                (values - nodes[:, b])
+                                / (nodes[:, a] - nodes[:, b])
+                            )
+
+            support_indices.append(indices.astype(np.int64))
+            support_weights.append(weights)
+
+        sizes = [indices.shape[1] for indices in support_indices]
+        n_corners = int(np.prod(sizes))
+        corners = np.empty((m, n_corners, d), dtype=np.int64)
+        weights = np.empty((m, n_corners), dtype=float)
+        selectors = itertools.product(*(range(size) for size in sizes))
+        for c, selector in enumerate(selectors):
+            weight = np.ones(m, dtype=float)
+            for j, local_index in enumerate(selector):
+                corners[:, c, j] = support_indices[j][:, local_index]
+                weight *= support_weights[j][:, local_index]
+            weights[:, c] = weight
+        return corners, weights
+
 
 def adaptive_axis(lower, upper, n, center=0.0, half_width=0.5, center_fraction=0.75):
     """Strictly increasing axis with most nodes in a central interval."""
