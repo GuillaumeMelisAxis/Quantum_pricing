@@ -67,6 +67,28 @@ For the European geometric basket, analytic or automatic reference Greeks should
 eventually replace finite differences. Finite differences remain useful because
 they test the deployed surrogate exactly as a risk engine would use it.
 
+### Short-maturity ATM resolution gate
+
+Before fitting another TT, isolate the deterministic grid floor on a panel with
+log-moneyness `[-0.05, -0.025, 0, 0.025, 0.05]` and maturities
+`[3, 7, 14, 30, 90]` days. Cross the physical resolutions
+`n_m in [64, 128, 256]` and `n_T in [8, 16, 32]` while leaving every other
+axis, market point and finite-difference bump unchanged.
+
+The experiment reports errors by exact maturity and moneyness level, with
+special summaries for the seven-day ATM layer. It also records
+`Delta m_ATM / (sigma_B sqrt(T))`. This distinguishes insufficient temporal
+resolution from the structural inability of a maturity-independent moneyness
+grid to resolve the shrinking short-dated convexity layer.
+
+```bash
+python scripts/validation/validate_short_maturity_greeks.py \
+    --replicates 3 \
+    --moneyness-nodes 64 128 256 \
+    --maturity-nodes 8 16 32 \
+    --relative-bump 0.002
+```
+
 ## Stage 3 - Exercise region
 
 For an American put, define the exercise premium

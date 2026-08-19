@@ -102,6 +102,85 @@ CPU time. TT-cross never materializes the full 137.4-billion-entry tensor.
 
 The complete validation design is in [`EXPERIMENTS.md`](EXPERIMENTS.md).
 
+## Market-coordinate Greeks
+
+Spot Greeks must be computed at fixed contractual strike. A surrogate trained
+in log-moneyness coordinates should therefore be exposed through
+MarketCoordinatePricer before applying finite differences:
+
+    from stngpr.coordinates import MarketCoordinatePricer
+    from stngpr.greeks import finite_difference_greeks
+
+    market_surrogate = MarketCoordinatePricer(model.predict, transform)
+    greeks = finite_difference_greeks(
+        market_surrogate,
+        market_parameters,
+        spot_columns=range(config.n_assets),
+        relative_bump=1e-3,
+    )
+
+The adapter recomputes m = log(K / B(S)) after each spot bump while keeping K
+fixed. The finite-difference routine evaluates the complete Delta, Gamma and
+cross-Gamma stencil in one vectorized pricing call and returns the actual bump
+used for every spot.
+
+Run the analytical bump-convergence test first:
+
+    python scripts/validation/validate_european_greeks.py \
+        --profile smoke \
+        --stage exact
+
+Measure next the interpolation floor using exact values at every grid corner:
+
+    python scripts/validation/validate_european_greeks.py \
+        --profile smoke \
+        --stage grid \
+        --grid-mode moneyness_adaptive
+
+Finally, run the same stencil on the adaptive TT surrogate:
+
+    python scripts/validation/validate_european_greeks.py \
+        --profile smoke \
+        --stage tt \
+        --grid-mode moneyness_adaptive
+
+The commands write JSON diagnostics under the results directory. The output
+contains global and regional errors for Delta, diagonal Gamma and cross-Gamma,
+together with grid-cell crossing rates and the TT fit diagnostics when
+applicable. The default relative bumps are 10%, 5%, 3%, 2%, 1% and 0.5%.
+
+Test the hybrid cubic correction with local bumps:
+
+    python scripts/validation/validate_european_greeks.py \
+        --profile smoke \
+        --stage grid_cubic \
+        --grid-mode moneyness_adaptive \
+        --relative-bumps 0.05 0.02 0.01 0.005 0.002 0.001
+
+    python scripts/validation/validate_european_greeks.py \
+        --profile smoke \
+        --stage tt_cubic \
+        --grid-mode moneyness_adaptive \
+        --relative-bumps 0.05 0.02 0.01 0.005 0.002 0.001
+
+For a diagonal Gamma, the relevant spot and log-moneyness axes use local
+four-node Lagrange interpolation. For a cross-Gamma, both spot axes and
+log-moneyness are cubic. All remaining axes stay multilinear.
+
+Run the short-maturity ATM grid ablation before increasing the TT budget:
+
+    python scripts/validation/validate_short_maturity_greeks.py \
+        --replicates 3 \
+        --moneyness-nodes 64 128 256 \
+        --maturity-nodes 8 16 32 \
+        --relative-bump 0.002
+
+This is an exact-grid experiment: it does not fit a TT. The nine paired
+configurations determine whether short-dated Gamma error is controlled by the
+maturity resolution, the moneyness resolution, or their interaction. The JSON
+contains global, conditional and pointwise metrics, together with the local
+ratio `Delta m_ATM / (sigma_B sqrt(T))`.
+
 ## Publication figures
 
 Generate the analytical geometric-basket convexity heat maps with the actual

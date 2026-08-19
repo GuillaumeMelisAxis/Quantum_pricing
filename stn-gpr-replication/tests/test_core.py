@@ -1,3 +1,4 @@
+from dataclasses import replace
 import math
 import unittest
 
@@ -126,6 +127,21 @@ class GridTests(unittest.TestCase):
         np.testing.assert_allclose(paper_t.axes[-1], money_t.axes[-1])
         np.testing.assert_allclose(paper.axes[-1], money_u.axes[-1])
         self.assertFalse(np.allclose(paper.axes[-1], paper_t.axes[-1]))
+
+    def test_moneyness_and_maturity_resolutions_can_vary_independently(self):
+        base = PaperConfig()
+        shape = list(base.physical_shape)
+        shape[base.n_assets] = 128
+        shape[-1] = 32
+        config = replace(base, physical_shape=tuple(shape))
+        grid, _, _ = build_coordinate_grid(
+            config,
+            "moneyness_adaptive",
+            "geometric",
+        )
+        self.assertEqual(grid.shape[base.n_assets], 128)
+        self.assertEqual(grid.shape[-1], 32)
+        self.assertEqual(grid.shape[-2], base.physical_shape[-2])
 
 
 class PricingTests(unittest.TestCase):
