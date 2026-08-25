@@ -102,6 +102,114 @@ CPU time. TT-cross never materializes the full 137.4-billion-entry tensor.
 
 The complete validation design is in [`EXPERIMENTS.md`](EXPERIMENTS.md).
 
+## V8 - Greek transferability across products
+
+Version 8 keeps the validated five-asset geometric benchmark and adds two
+explicit out-of-sample product classes:
+
+- a European arithmetic-basket put priced by scrambled Sobol-QMC with an exact
+  geometric-basket control variate;
+- an American arithmetic-basket put whose TT error is separated from an
+  independent multi-seed LSMC reference.
+
+The three validators store component-level arrays so that Delta, diagonal Gamma
+and cross-Gamma curves can be compared rather than summarized only by one MAE.
+Start with the following commands from the project root in the Windows x64
+Native Tools Command Prompt:
+
+```bat
+python -m pytest
+
+python scripts\validation\validate_refined_tt_greeks.py ^
+  --moneyness-nodes 64 --maturity-nodes 8 --budgets 2000 ^
+  --anova-samples 300 --replicates 1 --relative-bump 0.002 ^
+  --output results\greeks_v8_geometric_smoke.json
+
+python scripts\validation\validate_european_arithmetic_greeks.py ^
+  --profile smoke --stage all ^
+  --output results\greeks_v8_european_arithmetic_smoke.json
+
+python scripts\validation\validate_american_greeks.py ^
+  --profile smoke --stage tt ^
+  --output results\greeks_v8_american_arithmetic_smoke.json
+
+python scripts\figures\plot_greeks_product_comparison.py ^
+  --geometric results\greeks_v8_geometric_smoke.json ^
+  --arithmetic-european results\greeks_v8_european_arithmetic_smoke.json ^
+  --arithmetic-american results\greeks_v8_american_arithmetic_smoke.json ^
+  --maturity-days 30 ^
+  --output-dir figures\greeks_v8_smoke
+```
+
+The plotting command produces PNG and PDF versions of three figures: Greek
+profiles in log-moneyness, error heat maps in the `(m,T)` plane, and the joint
+accuracy/compression-cost summary. By default the displayed Hessian components
+are PSD-projected while raw estimates remain in every JSON; add `--raw` to plot
+the unconstrained Hessians.
+
+After the smoke gate passes, use the `intermediate` profiles. The `paper`
+profiles restore the frozen `32^5 x 512 x 8 x 64` grid. The European geometric
+run then uses the validated 150k TT-cross budget; the American script instead
+tests product-specific budgets because each LSMC label is much more expensive
+and noisy.
+
+## V8.1 - Reference convergence before TT compression
+
+Version 8.1 implements the reference-stabilization gate motivated by the V8
+smoke results. It must be run before increasing a TT-cross budget. From the
+project root in the Windows x64 Native Tools Command Prompt, the complete smoke
+campaign is:
+
+```bat
+scripts\run_greeks_v81_smoke.bat
+```
+
+The command runs the unit tests, both reference experiments and the comparison
+figures. The equivalent individual commands are:
+
+```bat
+python scripts\validation\converge_european_arithmetic_reference.py ^
+  --profile smoke ^
+  --output results\greeks_v81_european_reference_smoke.json
+
+python scripts\validation\converge_american_reference.py ^
+  --profile smoke ^
+  --output results\greeks_v81_american_reference_smoke.json
+
+python scripts\figures\plot_reference_convergence.py ^
+  --european results\greeks_v81_european_reference_smoke.json ^
+  --american results\greeks_v81_american_reference_smoke.json ^
+  --output-dir figures\greeks_v81_reference_convergence
+```
+
+The European experiment crosses Sobol path counts, spot bumps and two
+control-variate contracts: a sample-estimated coefficient and a coefficient
+fixed to one across the stencil. The American experiment crosses LSMC paths,
+exercise dates, bumps and three policy treatments: full refit, frozen policy on
+the same paths and frozen policy evaluated out of sample.
+
+Only two spot factors are bumped in the American convergence gate. This retains
+one diagonal and one cross-Gamma while reducing a five-asset full-Hessian
+stencil from 51 prices to 9 prices per market point. The selected configuration
+must later be validated on the complete five-asset Hessian.
+
+After the smoke gate succeeds, run the first scientific comparison with:
+
+```bat
+python scripts\validation\converge_european_arithmetic_reference.py ^
+  --profile intermediate ^
+  --output results\greeks_v81_european_reference_intermediate.json
+
+python scripts\validation\converge_american_reference.py ^
+  --profile intermediate ^
+  --output results\greeks_v81_american_reference_intermediate.json
+```
+
+Do not interpret a frozen-policy result as a corrected American Greek merely
+because its variance is smaller. The JSON reports its discrepancy from the
+highest-resolution refit anchor so that variance reduction and estimator bias
+remain separate.
+
 ## Market-coordinate Greeks
 
 Spot Greeks must be computed at fixed contractual strike. A surrogate trained

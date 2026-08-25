@@ -36,6 +36,15 @@ from validate_short_maturity_greeks import (
 
 
 DEFAULT_BUDGETS = (20_000, 50_000, 100_000)
+COMPONENTS = ("price", "delta", "gamma_diagonal", "cross_gamma")
+
+
+def components_to_json(components) -> dict:
+    """Persist component arrays required by the v8 comparison figures."""
+    return {
+        name: np.asarray(components[name], dtype=float).tolist()
+        for name in COMPONENTS
+    }
 
 
 def _power_of_two(value: int) -> bool:
@@ -192,6 +201,8 @@ def main():
     references = analytical_references(config, market_pricer, points)
 
     results = {
+        "schema_version": 1,
+        "product": "european_geometric_basket_put",
         "experiment": "refined-grid TT convergence for short-maturity Greeks",
         "design_seed": design_seed,
         "tt_seed": tt_seed,
@@ -223,6 +234,9 @@ def main():
             "replicate_ids": replicate_ids.tolist(),
         },
         "reference": "analytical geometric-basket put spot Greeks",
+        "analytical_reference": {
+            "components": components_to_json(references),
+        },
         "oracle": None,
         "tt": {},
     }
@@ -261,6 +275,8 @@ def main():
     results["oracle"] = {
         "wall_time_seconds": oracle_time,
         **oracle_summary,
+        "components": components_to_json(oracle_estimates),
+        "components_psd_projected": components_to_json(oracle_projected),
     }
     args.output.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"oracle complete in {oracle_time:.2f}s")
@@ -314,6 +330,8 @@ def main():
             },
             "greek_evaluation_time_seconds": evaluation_time,
             **tt_summary,
+            "components": components_to_json(tt_estimates),
+            "components_psd_projected": components_to_json(tt_projected),
             "reconstruction_error_against_oracle": {
                 "raw_components": component_metrics(
                     oracle_estimates,

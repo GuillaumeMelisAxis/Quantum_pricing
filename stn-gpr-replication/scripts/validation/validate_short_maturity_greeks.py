@@ -41,6 +41,7 @@ def short_atm_panel(
     moneyness_levels,
     maturity_days,
     rng,
+    basket_kind: str = "geometric",
 ):
     """Construct a paired design concentrated on the short-dated ATM layer."""
     if replicates <= 0:
@@ -56,7 +57,12 @@ def short_atm_panel(
     replicate_ids = []
     for replicate in range(replicates):
         spots = rng.uniform(45.0, 115.0, size=config.n_assets)
-        basket = float(np.exp(np.mean(np.log(spots))))
+        if basket_kind == "geometric":
+            basket = float(np.exp(np.mean(np.log(spots))))
+        elif basket_kind == "arithmetic":
+            basket = float(np.mean(spots))
+        else:
+            raise ValueError("basket_kind must be 'geometric' or 'arithmetic'")
         rate = float(rng.uniform(0.01, 0.06))
         for days in maturity_days:
             for moneyness in moneyness_levels:
@@ -157,6 +163,7 @@ def conditional_metrics(
         "focus": {
             name: component_metrics(references, estimates, mask)
             for name, mask in focus.items()
+            if np.any(mask)
         },
     }
 

@@ -14,6 +14,11 @@ from stngpr.coordinates import (
     oracle_hybrid_cubic_predict,
     oracle_multilinear_predict,
 )
+from stngpr.convergence import (
+    finite_difference_component_arrays,
+    gamma_matrices,
+    mean_and_standard_error,
+)
 from stngpr.diagnostics import (
     geometric_basket_convexity_ridge,
     geometric_basket_effective_parameters,
@@ -26,7 +31,11 @@ from stngpr.greeks import (
     project_symmetric_matrix_psd,
 )
 from stngpr.grids import QTTGrid, sinh_centered_axis
-from stngpr.pricers import geometric_basket_put
+from stngpr.pricers import (
+    AmericanArithmeticBasketLSMC,
+    EuropeanArithmeticBasketQMC,
+    geometric_basket_put,
+)
 from stngpr.risk import var_es
 from stngpr.validation import (
     american_put_binomial,
@@ -160,6 +169,129 @@ class PricingTests(unittest.TestCase):
         )
         self.assertTrue(np.all(prices >= 0.0))
 
+    def test_arithmetic_qmc_is_reproducible(self):
+        config = PaperConfig()
+        parameters = np.array([[80.0, 90.0, 100.0, 110.0, 120.0, 100.0, 0.03, 0.5]])
+        first = EuropeanArithmeticBasketQMC(
+            config, n_paths=512, seed=17
+        )(parameters)
+        second = EuropeanArithmeticBasketQMC(
+            config, n_paths=512, seed=17
+        )(parameters)
+        np.testing.assert_array_equal(first, second)
+
+    def test_arithmetic_qmc_respects_positive_homogeneity(self):
+        config = PaperConfig()
+        parameters = np.array([[70.0, 85.0, 100.0, 115.0, 130.0, 105.0, 0.03, 0.8]])
+        pricer = EuropeanArithmeticBasketQMC(config, n_paths=1_024, seed=19)
+        scaled = parameters.copy()
+        scaled[:, : config.n_assets + 1] *= 3.7
+        np.testing.assert_allclose(
+            pricer(scaled),
+            3.7 * pricer(parameters),
+            rtol=2e-13,
+            atol=2e-13,
+        )
+
+    def test_arithmetic_qmc_reduces_to_geometric_in_one_dimension(self):
+        config = PaperConfig(
+            n_assets=1,
+            volatilities=np.array([0.2]),
+            dividends=np.array([0.0]),
+            correlation=np.eye(1),
+            physical_shape=(32, 64, 8, 8),
+        )
+        parameters = np.array([[100.0, 105.0, 0.03, 0.75]])
+        qmc_price = EuropeanArithmeticBasketQMC(
+            config, n_paths=512, seed=23
+        )(parameters)[0]
+        exact = geometric_basket_put(
+            [[100.0]], [105.0], [0.03], [0.75], np.array([0.2]), np.eye(1)
+        )[0]
+        self.assertAlmostEqual(qmc_price, exact, places=11)
+
+    def test_arithmetic_qmc_unit_control_variate_is_exact_in_one_dimension(self):
+        config = PaperConfig(
+            n_assets=1,
+            volatilities=np.array([0.2]),
+            dividends=np.array([0.0]),
+            correlation=np.eye(1),
+            physical_shape=(32, 64, 8, 8),
+        )
+        parameters = np.array([[100.0, 105.0, 0.03, 0.75]])
+        qmc_price = EuropeanArithmeticBasketQMC(
+            config,
+            n_paths=512,
+            seed=23,
+            control_variate_beta="unit",
+        )(parameters)[0]
+        exact = geometric_basket_put(
+            [[100.0]], [105.0], [0.03], [0.75], np.array([0.2]), np.eye(1)
+        )[0]
+        self.assertAlmostEqual(qmc_price, exact, places=11)
+
+    def test_arithmetic_qmc_rejects_invalid_control_beta(self):
+        with self.assertRaisesRegex(ValueError, "control_variate_beta"):
+            EuropeanArithmeticBasketQMC(
+                PaperConfig(),
+                n_paths=512,
+                control_variate_beta="local",
+            )
+
+    def test_american_frozen_policy_is_reproducible_and_homogeneous(self):
+        config = PaperConfig()
+        base = np.array([80.0, 90.0, 100.0, 110.0, 120.0, 100.0, 0.03, 30 / 365])
+        bumped = base.copy()
+        bumped[0] *= 1.01
+        scenarios = np.vstack((base, bumped))
+        pricer = AmericanArithmeticBasketLSMC(
+            config,
+            n_paths=128,
+            n_steps=4,
+            seed=31,
+            policy_mode="frozen",
+        )
+        values = pricer(scenarios)
+        np.testing.assert_array_equal(values, pricer(scenarios))
+        scaled = scenarios.copy()
+        scaled[:, : config.n_assets + 1] *= 2.5
+        np.testing.assert_allclose(pricer(scaled), 2.5 * values, rtol=1e-12, atol=1e-12)
+
+    def test_american_frozen_policy_requires_one_fixed_contract(self):
+        config = PaperConfig()
+        scenarios = np.array([
+            [80.0, 90.0, 100.0, 110.0, 120.0, 100.0, 0.03, 30 / 365],
+            [80.0, 90.0, 100.0, 110.0, 120.0, 101.0, 0.03, 30 / 365],
+        ])
+        pricer = AmericanArithmeticBasketLSMC(
+            config,
+            n_paths=64,
+            n_steps=4,
+            seed=37,
+            policy_mode="frozen",
+        )
+        with self.assertRaisesRegex(ValueError, "strike, rate and maturity"):
+            pricer(scenarios)
+
+    def test_american_frozen_out_of_sample_greeks_are_finite(self):
+        config = PaperConfig()
+        point = np.array([80.0, 90.0, 100.0, 110.0, 120.0, 100.0, 0.03, 30 / 365])
+        pricer = AmericanArithmeticBasketLSMC(
+            config,
+            n_paths=128,
+            n_steps=4,
+            seed=41,
+            policy_mode="frozen_oos",
+        )
+        components = finite_difference_component_arrays(
+            pricer,
+            point[None, :],
+            risk_columns=(0, 1),
+            relative_bump=0.01,
+        )
+        for name in ("price", "delta", "gamma_diagonal", "cross_gamma"):
+            self.assertTrue(np.all(np.isfinite(components[name])))
+
     def test_geometric_convexity_is_positive_and_peaks_on_ridge(self):
         config = PaperConfig()
         rate = 0.03
@@ -232,6 +364,25 @@ class RiskTests(unittest.TestCase):
 
 
 class GreekTests(unittest.TestCase):
+    def test_convergence_helpers_preserve_hessian_layout(self):
+        first = {
+            "price": np.array([1.0]),
+            "delta": np.array([[2.0, 3.0]]),
+            "gamma_diagonal": np.array([[4.0, 5.0]]),
+            "cross_gamma": np.array([[6.0]]),
+        }
+        second = {
+            name: np.asarray(value) + 2.0
+            for name, value in first.items()
+        }
+        mean, standard_error = mean_and_standard_error([first, second])
+        np.testing.assert_allclose(mean["gamma_diagonal"], [[5.0, 6.0]])
+        np.testing.assert_allclose(standard_error["price"], [1.0])
+        np.testing.assert_allclose(
+            gamma_matrices(mean),
+            [[[5.0, 7.0], [7.0, 6.0]]],
+        )
+
     def test_psd_projection_enforces_convexity_and_reduces_frobenius_error(self):
         raw = np.array([[1.0, 2.0], [2.0, 1.0]])
         reference = np.eye(2)
