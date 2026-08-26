@@ -1,3 +1,32 @@
+# Version 9.2.1 — dense functional audit
+
+The v9.2.1 experiment is not another aggregate benchmark.  It samples 201
+uniform log-moneyness values in `[-0.35, 0.35]` on each paper-profile curve and
+stores analytical, exact-price finite-difference, multilinear and risk-hybrid
+cubic Greeks.  The requested 3-, 7-, 30- and 90-day maturities are evaluated as
+market values rather than snapped to maturity-grid nodes.  Its purpose is to
+detect hidden overshoots or oscillations between the sparse v9.2 control
+points.  See `V9_2_1_RUN_COMMANDS.md`.
+
+# Version 9.2 — residual Greek error floor
+
+The v9.2 gate freezes the `standardized_risk` coordinate and the v9.1 choice
+of 64 nodes on every spot axis.  It then varies only the relative finite-
+difference bump and the interpolation rule on three off-grid spot panels not
+used by v9.1.  The European geometric basket provides exact prices and exact
+fixed-strike Greeks, so every reported residual satisfies
+
+```text
+grid FD - analytical
+  = (exact-price FD - analytical) + (grid FD - exact-price FD).
+```
+
+The first term is the numerical differentiation layer and the second is the
+grid-interpolation layer.  TT reconstruction and Monte Carlo noise remain
+disabled.  The paper gate covers five bumps, six maturity buckets, seven
+log-moneyness levels and both multilinear and risk-hybrid cubic interpolation.
+See `V9_2_RUN_COMMANDS.md` for the exact commands.
+
 # Experimental protocol
 
 ## Stage 0 - Reproducibility contract

@@ -1,5 +1,28 @@
 # STN-GPR replication
 
+## Version 9.2.1: dense Greek profile audit
+
+Version 9.2.1 closes the visual-validation gap left by the sparse v9.2 panel.
+It evaluates continuous fixed-strike Delta, diagonal Gamma and cross-Gamma
+profiles on up to 201 uniformly spaced log-moneyness values per curve.  Exact
+analytical, exact-price finite-difference, multilinear and risk-hybrid cubic
+curves are stored pointwise, together with MAE, tail/max errors, total
+variation, turning-point and Hessian-shape diagnostics.  See
+`V9_2_1_RUN_COMMANDS.md`.
+
+## Version 9.2: Greek error-floor decomposition
+
+Version 9.2 freezes the v9.1 selection (`standardized_risk`, 64 nodes on
+every spot axis) and determines why the remaining second-order Greek error
+does not vanish monotonically under spot refinement.  On spot panels not used
+in v9.1, it ablates the relative bump and interpolation rule and reports the
+machine-checkable identity
+
+`grid FD - analytical = finite-difference error + grid-interpolation error`.
+
+No TT or Monte Carlo approximation is present in this diagnostic gate.  See
+`V9_2_RUN_COMMANDS.md` and `CHANGELOG_V9_2.md`.
+
 ## Version 9.1: standardized-risk spot-resolution ablation
 
 The v9 paper profile selects the maturity-standardized risk coordinate, but its

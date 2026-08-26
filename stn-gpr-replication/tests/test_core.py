@@ -1,11 +1,22 @@
-from dataclasses import replace
 import math
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
 from stngpr.baselines import ManhattanLaplacian
 from stngpr.config import PaperConfig
+from stngpr.convergence import (
+    columnwise_error_metrics,
+    component_error_decomposition,
+    component_residual_metrics,
+    cross_gamma_sign_diagnostics,
+    curve_error_diagnostics,
+    finite_difference_component_arrays,
+    full_hessian_error_metrics,
+    gamma_matrices,
+    mean_and_standard_error,
+)
 from stngpr.coordinates import (
     CachedGridInterpolator,
     CoordinateTransform,
@@ -14,12 +25,6 @@ from stngpr.coordinates import (
     build_coordinate_grid,
     oracle_hybrid_cubic_predict,
     oracle_multilinear_predict,
-)
-from stngpr.convergence import (
-    finite_difference_component_arrays,
-    finite_difference_hybrid_component_arrays,
-    gamma_matrices,
-    mean_and_standard_error,
 )
 from stngpr.diagnostics import (
     geometric_basket_convexity_ridge,
@@ -461,6 +466,106 @@ class RiskTests(unittest.TestCase):
 
 
 class GreekTests(unittest.TestCase):
+    def test_curve_error_diagnostics_detects_shape_oscillation(self):
+        moneyness = np.linspace(-1.0, 1.0, 5)
+        reference = moneyness**2
+        estimate = reference + np.array([0.0, -0.2, 0.2, -0.2, 0.0])
+        diagnostics = curve_error_diagnostics(
+            moneyness,
+            reference,
+            estimate,
+        )
+        self.assertEqual(diagnostics["point_count"], 5)
+        self.assertEqual(diagnostics["moneyness_at_maximum_error"], -0.5)
+        self.assertGreater(
+            diagnostics["shape_by_component_column"][0][
+                "estimate_turning_point_count"
+            ],
+            diagnostics["shape_by_component_column"][0][
+                "reference_turning_point_count"
+            ],
+        )
+
+    def test_full_hessian_diagnostics_separate_sign_and_psd(self):
+        reference = {
+            "gamma_diagonal": np.array([[2.0, 1.0], [1.5, 0.8]]),
+            "cross_gamma": np.array([[-0.5], [0.3]]),
+        }
+        estimate = {
+            "gamma_diagonal": np.array([[2.01, 0.99], [1.49, 0.81]]),
+            "cross_gamma": np.array([[-0.49], [0.29]]),
+        }
+        fidelity = full_hessian_error_metrics(reference, estimate)
+        signs = cross_gamma_sign_diagnostics(
+            reference["cross_gamma"],
+            estimate["cross_gamma"],
+            labels=["Gamma_12"],
+        )
+        self.assertGreater(fidelity["aggregate_relative_frobenius_error"], 0.0)
+        self.assertEqual(fidelity["material_psd_violation_count"], 0)
+        self.assertEqual(signs["sign_agreement_fraction"], 1.0)
+        self.assertEqual(signs["by_component"][0]["reference_negative_count"], 1)
+
+    def test_columnwise_error_metrics_preserve_labels(self):
+        reference = np.array([[1.0, 2.0], [2.0, 4.0]])
+        estimate = reference + np.array([[0.1, -0.2], [0.1, -0.2]])
+        metrics = columnwise_error_metrics(
+            reference,
+            estimate,
+            labels=["S1", "S2"],
+        )
+        self.assertEqual([record["label"] for record in metrics], ["S1", "S2"])
+        self.assertAlmostEqual(metrics[0]["mae"], 0.1)
+        self.assertAlmostEqual(metrics[1]["mae"], 0.2)
+
+    def test_component_error_decomposition_closes_exactly(self):
+        analytical = {
+            "price": np.array([10.0, 12.0]),
+            "delta": np.array([[-0.4, -0.2], [-0.3, -0.1]]),
+            "gamma_diagonal": np.array([[0.02, 0.03], [0.04, 0.05]]),
+            "cross_gamma": np.array([[0.01], [0.02]]),
+        }
+        exact_fd = {
+            name: np.asarray(values) + 0.1
+            for name, values in analytical.items()
+        }
+        grid_fd = {
+            name: np.asarray(values) - 0.025
+            for name, values in exact_fd.items()
+        }
+        decomposition = component_error_decomposition(
+            analytical,
+            exact_fd,
+            grid_fd,
+        )
+        for name in ("price", "delta", "gamma_diagonal", "cross_gamma"):
+            np.testing.assert_allclose(
+                decomposition["total"]["residuals"][name],
+                decomposition["finite_difference"]["residuals"][name]
+                + decomposition["grid_interpolation"]["residuals"][name],
+                atol=1e-15,
+            )
+            np.testing.assert_allclose(
+                decomposition["closure"]["residuals"][name],
+                0.0,
+                atol=1e-15,
+            )
+
+    def test_residual_layers_share_the_analytical_scale(self):
+        reference = {
+            "price": np.array([2.0]),
+            "delta": np.array([[4.0, -4.0]]),
+            "gamma_diagonal": np.array([[0.5, 1.5]]),
+            "cross_gamma": np.array([[0.25]]),
+        }
+        residual = {
+            name: 0.1 * np.asarray(values)
+            for name, values in reference.items()
+        }
+        metrics = component_residual_metrics(reference, residual)
+        for name in ("price", "delta", "gamma_diagonal", "cross_gamma"):
+            self.assertAlmostEqual(metrics[name]["normalized_mae"], 0.1)
+
     def test_convergence_helpers_preserve_hessian_layout(self):
         first = {
             "price": np.array([1.0]),
