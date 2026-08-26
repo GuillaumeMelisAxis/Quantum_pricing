@@ -80,6 +80,87 @@ class MarketCoordinatePricer:
         return values
 
 
+class CachedGridInterpolator:
+    """Exact grid-node interpolator with a persistent deterministic cache.
+
+    This class is intended for controlled error decompositions.  It evaluates
+    the original pricing oracle at every grid node required by the requested
+    interpolation stencil, while caching repeated nodes across market points
+    and Greek bumps.  Consequently, it contains interpolation error but no TT
+    reconstruction error.
+    """
+
+    def __init__(self, grid, pricer, evaluation_batch_size=64):
+        self.grid = grid
+        self.pricer = pricer
+        self.evaluation_batch_size = int(evaluation_batch_size)
+        if self.evaluation_batch_size <= 0:
+            raise ValueError("evaluation_batch_size must be positive")
+        self._cache = {}
+        self.requested_node_count = 0
+        self.function_evaluations = 0
+
+    @property
+    def cache_size(self):
+        return len(self._cache)
+
+    @property
+    def cache_hit_count(self):
+        return self.requested_node_count - self.function_evaluations
+
+    def diagnostics(self):
+        requested = int(self.requested_node_count)
+        hits = int(self.cache_hit_count)
+        return {
+            "requested_node_count": requested,
+            "unique_function_evaluations": int(self.function_evaluations),
+            "cache_hit_count": hits,
+            "cache_hit_fraction": hits / requested if requested else 0.0,
+        }
+
+    def _values_at_indices(self, indices):
+        indices = np.asarray(indices, dtype=np.int64)
+        if indices.ndim != 2 or indices.shape[1] != len(self.grid.shape):
+            raise ValueError("indices have the wrong physical dimension")
+
+        unique, inverse = np.unique(indices, axis=0, return_inverse=True)
+        self.requested_node_count += int(indices.shape[0])
+        missing = [
+            row for row in unique
+            if tuple(int(value) for value in row) not in self._cache
+        ]
+        if missing:
+            missing = np.asarray(missing, dtype=np.int64)
+            for start in range(0, len(missing), self.evaluation_batch_size):
+                batch = missing[start : start + self.evaluation_batch_size]
+                points = self.grid.indices_to_points(batch)
+                values = np.asarray(self.pricer(points), dtype=float).reshape(-1)
+                if values.size != len(batch) or not np.all(np.isfinite(values)):
+                    raise ValueError(
+                        "the grid oracle must return one finite value per node"
+                    )
+                for row, value in zip(batch, values):
+                    key = tuple(int(item) for item in row)
+                    self._cache[key] = float(value)
+            self.function_evaluations += int(len(missing))
+
+        unique_values = np.asarray([
+            self._cache[tuple(int(value) for value in row)]
+            for row in unique
+        ])
+        return unique_values[inverse]
+
+    def __call__(self, points, cubic_columns=()):
+        points = np.atleast_2d(np.asarray(points, dtype=float))
+        corners, weights = self.grid.hybrid_cubic_stencil(
+            points,
+            cubic_columns=cubic_columns,
+        )
+        flat = corners.reshape(-1, corners.shape[-1])
+        values = self._values_at_indices(flat).reshape(corners.shape[:2])
+        return np.sum(weights * values, axis=1)
+
+
 def build_coordinate_grid(config, mode: str, basket_kind: str):
     if mode not in GRID_MODES:
         raise ValueError(f"unknown grid mode: {mode}")

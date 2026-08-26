@@ -7,6 +7,7 @@ import numpy as np
 from stngpr.baselines import ManhattanLaplacian
 from stngpr.config import PaperConfig
 from stngpr.coordinates import (
+    CachedGridInterpolator,
     CoordinateTransform,
     MarketCoordinatePricer,
     TransformedPricer,
@@ -16,6 +17,7 @@ from stngpr.coordinates import (
 )
 from stngpr.convergence import (
     finite_difference_component_arrays,
+    finite_difference_hybrid_component_arrays,
     gamma_matrices,
     mean_and_standard_error,
 )
@@ -37,6 +39,11 @@ from stngpr.pricers import (
     geometric_basket_put,
 )
 from stngpr.risk import var_es
+from stngpr.risk_grids import (
+    StandardizedRiskTransform,
+    build_greek_coordinate_grid,
+    gamma_monitor_axis,
+)
 from stngpr.validation import (
     american_put_binomial,
     black_scholes_put,
@@ -95,6 +102,28 @@ class GridTests(unittest.TestCase):
         )
         np.testing.assert_allclose(predicted, pricer(points), atol=2e-14)
 
+    def test_cached_grid_interpolator_reuses_exact_node_values(self):
+        grid = QTTGrid(axes=(
+            np.array([-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5]),
+            np.array([0.0, 0.25, 0.5, 1.0]),
+        ))
+        calls = {"count": 0}
+
+        def oracle(x):
+            calls["count"] += len(x)
+            return 1.0 + x[:, 0] ** 3 - 0.5 * x[:, 1]
+
+        cached = CachedGridInterpolator(grid, oracle, evaluation_batch_size=3)
+        points = np.array([[0.2, 0.4], [0.7, 0.8]])
+        first = cached(points, cubic_columns=(0,))
+        first_count = calls["count"]
+        second = cached(points, cubic_columns=(0,))
+        np.testing.assert_allclose(first, oracle(points), atol=2e-14)
+        np.testing.assert_array_equal(first, second)
+        self.assertEqual(calls["count"], first_count + len(points))
+        self.assertEqual(cached.function_evaluations, first_count)
+        self.assertGreater(cached.cache_hit_count, 0)
+
     def test_adaptive_grid_concentrates_moneyness_nodes_at_atm(self):
         config = PaperConfig()
         grid, _, description = build_coordinate_grid(
@@ -152,6 +181,74 @@ class GridTests(unittest.TestCase):
         self.assertEqual(grid.shape[base.n_assets], 128)
         self.assertEqual(grid.shape[-1], 32)
         self.assertEqual(grid.shape[-2], base.physical_shape[-2])
+
+    def test_standardized_risk_coordinate_round_trip(self):
+        config = PaperConfig()
+        transform = StandardizedRiskTransform(
+            config.n_assets,
+            config.volatilities,
+            config.correlation,
+            config.dividends,
+        )
+        market = np.array([
+            [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 14.0 / 365.0],
+            [50.0, 65.0, 80.0, 95.0, 110.0, 75.0, 0.06, 2.0],
+        ])
+        recovered = transform.to_market(transform.to_model(market))
+        np.testing.assert_allclose(recovered, market, rtol=2e-14, atol=2e-14)
+
+    def test_gamma_monitor_axis_is_strict_and_preserves_bounds(self):
+        config = PaperConfig()
+        basket_sigma, basket_carry = geometric_basket_effective_parameters(
+            0.03,
+            config.volatilities,
+            config.correlation,
+            config.dividends,
+        )
+        axis, description = gamma_monitor_axis(
+            -1.0,
+            0.8,
+            64,
+            np.array([7.0, 30.0, 365.0]) / 365.0,
+            0.03,
+            basket_sigma,
+            basket_carry,
+            dense_nodes=1025,
+        )
+        self.assertEqual(axis.size, 64)
+        self.assertEqual(axis[0], -1.0)
+        self.assertEqual(axis[-1], 0.8)
+        self.assertTrue(np.all(np.diff(axis) > 0.0))
+        self.assertIn("d4u/dm4", description["definition"])
+
+    def test_v9_grid_candidates_have_identical_tensor_shapes(self):
+        config = PaperConfig()
+        shapes = []
+        for mode in (
+            "m_uniform",
+            "price_adaptive",
+            "gamma_monitor",
+            "standardized_risk",
+        ):
+            grid, _, description = build_greek_coordinate_grid(config, mode)
+            shapes.append(grid.shape)
+            self.assertEqual(description["mode"], mode)
+        self.assertTrue(all(shape == shapes[0] for shape in shapes))
+
+    def test_standardized_coordinate_axis_is_invariant_to_spot_resolution(self):
+        base = PaperConfig()
+        axes = []
+        for n_spot in (16, 32, 64):
+            shape = list(base.physical_shape)
+            shape[: base.n_assets] = [n_spot] * base.n_assets
+            config = replace(base, physical_shape=tuple(shape))
+            grid, _, _ = build_greek_coordinate_grid(
+                config,
+                "standardized_risk",
+            )
+            axes.append(grid.axes[base.n_assets])
+        np.testing.assert_array_equal(axes[0], axes[1])
+        np.testing.assert_array_equal(axes[1], axes[2])
 
 
 class PricingTests(unittest.TestCase):

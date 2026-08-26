@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .greeks import finite_difference_greeks
+from .greeks import finite_difference_greeks, finite_difference_hybrid_greeks
 
 
 COMPONENTS = ("price", "delta", "gamma_diagonal", "cross_gamma")
@@ -51,6 +51,51 @@ def finite_difference_component_arrays(
     records = [
         finite_difference_greeks(
             pricer,
+            point,
+            spot_columns=columns,
+            relative_bump=relative_bump,
+        )
+        for point in np.asarray(points, dtype=float)
+    ]
+    pairs = [
+        (left, right)
+        for position, left in enumerate(columns)
+        for right in columns[position + 1 :]
+    ]
+    return {
+        "price": np.asarray([record["price"] for record in records]),
+        "delta": np.asarray([
+            [record["delta"][column] for column in columns]
+            for record in records
+        ]),
+        "gamma_diagonal": np.asarray([
+            [record["gamma"][(column, column)] for column in columns]
+            for record in records
+        ]),
+        "cross_gamma": np.asarray([
+            [record["gamma"][pair] for pair in pairs]
+            for record in records
+        ]),
+        "risk_columns": columns,
+        "cross_gamma_pairs": pairs,
+    }
+
+
+def finite_difference_hybrid_component_arrays(
+    interpolator,
+    transform,
+    points,
+    risk_columns,
+    relative_bump,
+):
+    """Selected fixed-strike Greeks from a hybrid grid interpolator."""
+    columns = tuple(int(column) for column in risk_columns)
+    if not columns or len(set(columns)) != len(columns):
+        raise ValueError("risk_columns must be non-empty and unique")
+    records = [
+        finite_difference_hybrid_greeks(
+            interpolator,
+            transform,
             point,
             spot_columns=columns,
             relative_bump=relative_bump,

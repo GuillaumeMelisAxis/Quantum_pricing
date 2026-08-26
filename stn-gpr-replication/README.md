@@ -1,5 +1,48 @@
 # STN-GPR replication
 
+## Version 9.1: standardized-risk spot-resolution ablation
+
+The v9 paper profile selects the maturity-standardized risk coordinate, but its
+remaining diagonal-Gamma error is concentrated outside the central moneyness
+region and appears common to otherwise different moneyness grids. Version 9.1
+tests the resulting spot-resolution hypothesis without TT compression.
+
+The experiment holds the standardized coordinate at 512 nodes, maturity at 64
+nodes, the rate axis, bump and market points fixed, then varies every spot axis
+through 16, 32, 64 and 128 nodes. Three fixed off-grid basket panels prevent
+the 32-node reference architecture from receiving an exact-node advantage.
+See `V9_1_RUN_COMMANDS.md`.
+
+## Version 9: derivative-aware coordinate ablation
+
+Version 9 starts the constructive experiment that follows the negative v8.2
+result. It does not spend another TT-cross budget on the existing pricing grid.
+Instead, it compares four equal-size coordinate systems against analytical
+fixed-strike Greeks of a European geometric-basket put:
+
+- uniform log-moneyness;
+- the existing price-adaptive sinh grid;
+- a static Gamma-error monitor based on the fourth derivative of normalized
+  price;
+- a maturity-standardized risk coordinate centred on the analytical
+  convexity ridge.
+
+The validator separates the exact-price finite-difference truncation error from
+the grid interpolation error, uses common spot/rate/maturity nodes, and reports
+price, Delta, diagonal Gamma, cross-Gamma, full Hessian and PSD diagnostics.
+No TT or Monte Carlo layer is present in this first gate. See
+`V9_RUN_COMMANDS.md` and `CHANGELOG_V9.md`.
+
+## Version 8.2: American Greek error decomposition
+
+Version 8.2 adds a controlled decomposition of American fixed-strike Greek
+errors into LSMC training-label, adaptive-grid interpolation and TT
+reconstruction layers. The intermediate and paper profiles use the validated
+50,000-path, 80-exercise-date, eight-seed LSMC reference with a 3% bump.
+
+See `V8_2_RUN_COMMANDS.md` for the Windows Native Tools commands and
+`CHANGELOG_V8_2.md` for the mathematical definition of each error layer.
+
 Independent implementation of *STN-GPR: A Singularity Tensor Network Framework
 for Efficient Option Pricing* (Gribben et al., 2026), followed by experiments on
 VaR/ES, Greeks and the American exercise region.

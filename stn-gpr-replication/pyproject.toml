@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stn-gpr-replication"
-version = "0.11.1"
+version = "0.14.1"
 description = "Reproducible implementation and extensions of the STN-GPR option-pricing framework"
 requires-python = ">=3.10"
 dependencies = [

@@ -15,6 +15,8 @@ class FitDiagnostics:
     sweeps: int
     stop: str
     effective_rank: float
+    maximum_rank: int
+    parameter_count: int
 
 
 class TTPriceSurrogate:
@@ -75,6 +77,8 @@ class TTPriceSurrogate:
             sweeps=int(info.get("nswp", 0)),
             stop=str(info.get("stop", "unknown")),
             effective_rank=float(teneva.erank(self.cores)),
+            maximum_rank=int(max(core.shape[-1] for core in self.cores[:-1])),
+            parameter_count=int(sum(core.size for core in self.cores)),
         )
         return self.diagnostics
 
