@@ -238,6 +238,57 @@ def component_error_decomposition(analytical, exact_price_fd, grid_price_fd):
     }
 
 
+def tt_component_error_decomposition(
+    analytical,
+    exact_price_fd,
+    grid_price_fd,
+    tt_price_fd,
+):
+    r"""Decompose total TT Greek error into differentiation, grid and TT layers.
+
+    For each stored component, the machine-checkable identity is
+
+    ``tt - analytical = (exact_fd - analytical)``
+    ``+ (grid_fd - exact_fd) + (tt - grid_fd)``.
+
+    Every layer is normalized by the analytical component scale.
+    """
+    layers = {}
+    definitions = {
+        "finite_difference": (exact_price_fd, analytical),
+        "grid_interpolation": (grid_price_fd, exact_price_fd),
+        "tt_reconstruction": (tt_price_fd, grid_price_fd),
+        "total": (tt_price_fd, analytical),
+    }
+    for layer, (left, right) in definitions.items():
+        layers[layer] = {
+            name: (
+                np.asarray(left[name], dtype=float)
+                - np.asarray(right[name], dtype=float)
+            )
+            for name in COMPONENTS
+        }
+    layers["closure"] = {
+        name: (
+            layers["total"][name]
+            - layers["finite_difference"][name]
+            - layers["grid_interpolation"][name]
+            - layers["tt_reconstruction"][name]
+        )
+        for name in COMPONENTS
+    }
+    return {
+        layer: {
+            "residuals": {
+                name: np.asarray(values[name], dtype=float)
+                for name in COMPONENTS
+            },
+            "metrics": component_residual_metrics(analytical, values),
+        }
+        for layer, values in layers.items()
+    }
+
+
 def curve_error_diagnostics(moneyness, reference, estimate):
     """Measure pointwise error and shape distortion along one moneyness curve."""
     moneyness = np.asarray(moneyness, dtype=float).reshape(-1)

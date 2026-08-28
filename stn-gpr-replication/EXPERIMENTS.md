@@ -1,3 +1,59 @@
+# Version 9.4 — QTT budget and seed convergence
+
+V9.4 is the first TT-compressed experiment after the grid-only v9.0--v9.3
+sequence.  It uses the European geometric-basket put, the full 51-price
+fixed-strike stencil, three out-of-sample spot panels, four maturities and five
+log-moneyness levels.  Requested QTT-cross budgets are 20k, 50k, 100k, 150k and
+200k; the actual oracle count, including ANOVA initialization and the final
+cross batch, is always reported.
+
+The initial implementation revealed a domain pathology before any paper run:
+the unbounded coordinate
+
+```text
+z = asinh((m - ridge(r,T)) / (sigma_B sqrt(T)))
+```
+
+is well behaved locally but its global extrema cannot be crossed with every
+maturity in one Cartesian tensor.  Extreme short-maturity `z` values combined
+with long maturities produced economically meaningless log-moneyness and
+destabilized TT-ANOVA.  V9.4 maps the maturity-dependent standardized interval
+to `[-1,1]`, so both endpoints recover the fixed global moneyness bounds at
+every `(r,T)`.  The coordinate remains concentrated in standardized risk while
+the complete tensor stays inside the pricing domain.
+
+For every TT run, the stored residuals satisfy componentwise
+
+```text
+TT FD - analytical
+  = (exact-price FD - analytical)
+  + (grid FD - exact-price FD)
+  + (TT FD - grid FD).
+```
+
+The paper campaign contains one full budget sweep and five independent seeds
+at the retained 150k budget.  Acceptance is based on total price/Greek error,
+full-Hessian Frobenius error, material cross-Gamma sign agreement and the
+relative norm of the negative Hessian part.  See `V9_4_RUN_COMMANDS.md`.
+
+# Version 9.3 — complete five-asset Hessian gate
+
+The v9.3 experiment is the last grid-only gate before TT compression is
+reintroduced.  It keeps the v9.2 numerical choices fixed and expands the
+finite-difference stencil from two selected spot factors to all five factors.
+Each market point therefore requires 51 fixed-strike prices and yields five
+Deltas plus the fifteen independent entries of the symmetric 5x5 Hessian.
+
+The experiment does not impose non-negative cross-Gammas.  For a geometric
+basket, the analytical cross-Gamma can be negative because the basket map is
+concave in the individual spots.  Instead, v9.3 measures sign agreement away
+from near-zero tails and tests positive semidefiniteness of the full Hessian
+with both absolute and scale-aware diagnostics.
+
+The paper profile uses 101 moneyness values in `[-0.35, 0.35]`, maturities of
+3, 7, 30 and 90 days and all three out-of-sample spot panels.  No TT or Monte
+Carlo layer is present.  See `V9_3_RUN_COMMANDS.md`.
+
 # Version 9.2.1 — dense functional audit
 
 The v9.2.1 experiment is not another aggregate benchmark.  It samples 201

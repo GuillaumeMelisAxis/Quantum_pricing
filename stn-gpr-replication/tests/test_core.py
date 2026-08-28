@@ -16,6 +16,7 @@ from stngpr.convergence import (
     full_hessian_error_metrics,
     gamma_matrices,
     mean_and_standard_error,
+    tt_component_error_decomposition,
 )
 from stngpr.coordinates import (
     CachedGridInterpolator,
@@ -45,6 +46,7 @@ from stngpr.pricers import (
 )
 from stngpr.risk import var_es
 from stngpr.risk_grids import (
+    BoundedStandardizedRiskTransform,
     StandardizedRiskTransform,
     build_greek_coordinate_grid,
     gamma_monitor_axis,
@@ -202,6 +204,43 @@ class GridTests(unittest.TestCase):
         recovered = transform.to_market(transform.to_model(market))
         np.testing.assert_allclose(recovered, market, rtol=2e-14, atol=2e-14)
 
+    def test_bounded_standardized_risk_is_tensor_compatible(self):
+        config = PaperConfig()
+        m_bounds = (
+            np.log(config.strike_bounds[0] / config.spot_bounds[1]),
+            np.log(config.strike_bounds[1] / config.spot_bounds[0]),
+        )
+        transform = BoundedStandardizedRiskTransform(
+            config.n_assets,
+            config.volatilities,
+            config.correlation,
+            config.dividends,
+            moneyness_bounds=m_bounds,
+        )
+        market = np.array([
+            [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 14.0 / 365.0],
+            [50.0, 65.0, 80.0, 95.0, 110.0, 75.0, 0.06, 2.0],
+        ])
+        model = transform.to_model(market)
+        self.assertTrue(np.all(np.abs(model[:, config.n_assets]) <= 1.0))
+        np.testing.assert_allclose(
+            transform.to_market(model),
+            market,
+            rtol=2e-14,
+            atol=2e-14,
+        )
+
+        grid, grid_transform, _ = build_greek_coordinate_grid(
+            config,
+            "bounded_standardized_risk",
+        )
+        indices = grid.random_physical_indices(256, np.random.default_rng(9))
+        tensor_market = grid_transform.to_market(grid.indices_to_points(indices))
+        basket = np.exp(np.mean(np.log(tensor_market[:, : config.n_assets]), axis=1))
+        log_moneyness = np.log(tensor_market[:, config.n_assets] / basket)
+        self.assertGreaterEqual(np.min(log_moneyness), m_bounds[0] - 1e-13)
+        self.assertLessEqual(np.max(log_moneyness), m_bounds[1] + 1e-13)
+
     def test_gamma_monitor_axis_is_strict_and_preserves_bounds(self):
         config = PaperConfig()
         basket_sigma, basket_carry = geometric_basket_effective_parameters(
@@ -234,6 +273,7 @@ class GridTests(unittest.TestCase):
             "price_adaptive",
             "gamma_monitor",
             "standardized_risk",
+            "bounded_standardized_risk",
         ):
             grid, _, description = build_greek_coordinate_grid(config, mode)
             shapes.append(grid.shape)
@@ -545,6 +585,38 @@ class GreekTests(unittest.TestCase):
                 + decomposition["grid_interpolation"]["residuals"][name],
                 atol=1e-15,
             )
+            np.testing.assert_allclose(
+                decomposition["closure"]["residuals"][name],
+                0.0,
+                atol=1e-15,
+            )
+
+    def test_tt_component_error_decomposition_closes_exactly(self):
+        analytical = {
+            "price": np.array([10.0]),
+            "delta": np.array([[-0.4, -0.2]]),
+            "gamma_diagonal": np.array([[0.02, 0.03]]),
+            "cross_gamma": np.array([[0.01]]),
+        }
+        exact_fd = {
+            name: np.asarray(values) + 0.01
+            for name, values in analytical.items()
+        }
+        grid_fd = {
+            name: np.asarray(values) - 0.02
+            for name, values in exact_fd.items()
+        }
+        tt_fd = {
+            name: np.asarray(values) + 0.03
+            for name, values in grid_fd.items()
+        }
+        decomposition = tt_component_error_decomposition(
+            analytical,
+            exact_fd,
+            grid_fd,
+            tt_fd,
+        )
+        for name in ("price", "delta", "gamma_diagonal", "cross_gamma"):
             np.testing.assert_allclose(
                 decomposition["closure"]["residuals"][name],
                 0.0,

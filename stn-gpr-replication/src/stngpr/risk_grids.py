@@ -12,12 +12,16 @@ from .diagnostics import (
 )
 from .grids import QTTGrid, short_maturity_axis, sinh_centered_axis
 
-
 GREEK_GRID_MODES = (
     "m_uniform",
     "price_adaptive",
     "gamma_monitor",
     "standardized_risk",
+)
+
+TENSOR_COMPATIBLE_GREEK_GRID_MODES = (
+    *GREEK_GRID_MODES,
+    "bounded_standardized_risk",
 )
 
 
@@ -194,6 +198,68 @@ class StandardizedRiskTransform:
         return z
 
 
+@dataclass(frozen=True)
+class BoundedStandardizedRiskTransform(StandardizedRiskTransform):
+    r"""Tensor-compatible standardized-risk coordinate on ``[-1, 1]``.
+
+    The unbounded standardized coordinate depends on maturity.  Taking one
+    global Cartesian product of its extrema with every maturity can therefore
+    map valid tensor nodes far outside the intended log-moneyness domain.  This
+    transform normalizes the maturity-dependent standardized interval to
+    ``[-1, 1]``.  Its two endpoints map exactly to ``moneyness_bounds`` for
+    every rate and maturity while retaining standardized-risk node density.
+    """
+
+    moneyness_bounds: tuple[float, float] = (-1.0, 1.0)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        lower, upper = self.moneyness_bounds
+        if not np.isfinite(lower) or not np.isfinite(upper) or lower >= upper:
+            raise ValueError("invalid log-moneyness bounds")
+
+    def _standardized_bounds(
+        self,
+        rates: np.ndarray,
+        maturities: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        ridge = self._ridge(rates, maturities)
+        scale = self.basket_volatility * np.sqrt(maturities)
+        lower, upper = self.moneyness_bounds
+        return (
+            np.arcsinh((float(lower) - ridge) / scale),
+            np.arcsinh((float(upper) - ridge) / scale),
+        )
+
+    def to_model(self, market_parameters: np.ndarray) -> np.ndarray:
+        x = np.atleast_2d(np.asarray(market_parameters, dtype=float)).copy()
+        basket = self._basket(x[:, : self.n_assets])
+        m = np.log(x[:, self.n_assets] / basket)
+        rates = x[:, self.n_assets + 1]
+        maturities = x[:, self.n_assets + 2]
+        ridge = self._ridge(rates, maturities)
+        scale = self.basket_volatility * np.sqrt(maturities)
+        standardized = np.arcsinh((m - ridge) / scale)
+        lower, upper = self._standardized_bounds(rates, maturities)
+        x[:, self.n_assets] = (
+            2.0 * (standardized - lower) / (upper - lower) - 1.0
+        )
+        return x
+
+    def to_market(self, model_parameters: np.ndarray) -> np.ndarray:
+        z = np.atleast_2d(np.asarray(model_parameters, dtype=float)).copy()
+        basket = self._basket(z[:, : self.n_assets])
+        rates = z[:, self.n_assets + 1]
+        maturities = z[:, self.n_assets + 2]
+        lower, upper = self._standardized_bounds(rates, maturities)
+        normalized = z[:, self.n_assets]
+        standardized = lower + 0.5 * (normalized + 1.0) * (upper - lower)
+        scale = self.basket_volatility * np.sqrt(maturities)
+        m = self._ridge(rates, maturities) + scale * np.sinh(standardized)
+        z[:, self.n_assets] = basket * np.exp(m)
+        return z
+
+
 def _standardized_bounds(config, transform, m_bounds) -> tuple[float, float]:
     values = []
     reference_spots = np.full(config.n_assets, 100.0)
@@ -215,7 +281,7 @@ def build_greek_coordinate_grid(
     monitor_rate: float = 0.03,
 ) -> tuple[QTTGrid, object, dict]:
     """Build one equal-size coordinate candidate for the v9 Greek ablation."""
-    if mode not in GREEK_GRID_MODES:
+    if mode not in TENSOR_COMPATIBLE_GREEK_GRID_MODES:
         raise ValueError(f"unknown Greek grid mode: {mode}")
 
     from .coordinates import CoordinateTransform
@@ -249,6 +315,29 @@ def build_greek_coordinate_grid(
             "type": "uniform in standardized risk coordinate",
             "basket_volatility": transform.basket_volatility,
             "mapped_full_moneyness_bounds": list(m_bounds),
+        }
+    elif mode == "bounded_standardized_risk":
+        transform = BoundedStandardizedRiskTransform(
+            n_assets=config.n_assets,
+            volatilities=config.volatilities,
+            correlation=config.correlation,
+            dividends=config.dividends,
+            moneyness_bounds=m_bounds,
+        )
+        coordinate_bounds = (-1.0, 1.0)
+        coordinate_axis = np.linspace(*coordinate_bounds, coordinate_nodes)
+        coordinate_definition = (
+            "normalized standardized risk coordinate: maturity-dependent "
+            "z interval mapped to [-1,1]"
+        )
+        construction = {
+            "type": "bounded tensor-compatible standardized risk coordinate",
+            "basket_volatility": transform.basket_volatility,
+            "mapped_full_moneyness_bounds": list(m_bounds),
+            "endpoint_invariant": (
+                "coordinate -1 and +1 map to the fixed global "
+                "log-moneyness bounds for every (r,T)"
+            ),
         }
     else:
         transform = CoordinateTransform(
@@ -293,14 +382,7 @@ def build_greek_coordinate_grid(
             construction["type"] = "Greek-adaptive fourth-derivative monitor"
 
     grid = QTTGrid(
-        axes=tuple(
-            [
-                *spot_axes,
-                coordinate_axis,
-                rate_axis,
-                maturity_axis,
-            ]
-        )
+        axes=(*spot_axes, coordinate_axis, rate_axis, maturity_axis)
     )
     return grid, transform, {
         "mode": mode,

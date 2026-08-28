@@ -1,5 +1,34 @@
 # STN-GPR replication
 
+## Version 9.4: QTT reconstruction convergence for Greeks
+
+Version 9.4 reintroduces QTT-cross only after the v9.3 five-asset Greek gate.
+It measures the 20k--200k reconstruction-budget curve, retains 150k as the
+candidate operating point, and repeats that point over five independent TT
+seeds.  Every result separates finite-difference, grid-interpolation and TT
+reconstruction errors for price, all five Deltas and the full 5x5 spot
+Hessian.
+
+The first compression smoke test exposed that the original unbounded
+standardized coordinate is local rather than globally tensor-compatible: its
+global coordinate extrema combined with unrelated maturities can generate
+log-moneyness outside the economic domain.  V9.4 therefore uses a bounded
+standardized-risk coordinate whose endpoints map exactly to the original
+log-moneyness bounds for every rate and maturity.  The JSON includes a tensor-
+domain audit, actual oracle evaluations, ranks, fit times, sign diagnostics and
+scale-aware PSD diagnostics.  See `V9_4_RUN_COMMANDS.md`.
+
+## Version 9.3: full five-asset spot Hessian
+
+Version 9.3 freezes the v9.2 selection at 64 spot nodes, 512 standardized-risk
+nodes, 64 maturity nodes and a 0.2% fixed-strike spot bump.  It validates all
+five spot Deltas, five diagonal Gammas and ten cross-Gammas of the European
+geometric-basket put.  The complete 5x5 Hessian is compared with the analytical
+oracle and exact-price finite differences on dense moneyness curves and three
+heterogeneous spot panels.  Componentwise errors, cross-Gamma sign fidelity,
+Frobenius error and scale-aware PSD diagnostics are reported.  See
+`V9_3_RUN_COMMANDS.md`.
+
 ## Version 9.2.1: dense Greek profile audit
 
 Version 9.2.1 closes the visual-validation gap left by the sparse v9.2 panel.
