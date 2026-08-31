@@ -1,5 +1,35 @@
 # STN-GPR replication
 
+## Version 9.5: Greek-aware multi-seed truncation
+
+Version 9.5 closes the price-norm truncation investigation on the selected
+bounded standardized-risk grid.  For each of five TT-cross seeds, it fits one
+raw 200k surrogate and reapplies the tolerances `0`, `1e-14`, `1e-12`, `1e-10`
+and `1e-8` to exactly the same raw cores.  The output records the complete QTT
+bond-rank path, price and full-Hessian errors, material cross-Gamma signs and
+the fraction of raw parameters retained.
+
+The automatic selection is intentionally conservative: it chooses the most
+compressed tolerance that passes every price, Delta, Gamma, Hessian, PSD and
+material-sign criterion for every requested seed.  Dedicated figures show the
+seed range, compression response, pass/fail matrix and accuracy-compression
+frontier.  See `V9_5_RUN_COMMANDS.md`.
+
+## Version 9.4.1: budget-seed and truncation stability
+
+Version 9.4.1 follows the non-monotone v9.4 Hessian result.  It extends the
+100k, 150k and 200k budgets to the complete five-seed matrix while resuming the
+existing v9.4 JSON, so only eight missing fits are computed.  Every new fit
+records QTT rank and parameter count both before and after price-norm
+truncation.
+
+A separate controlled ablation fits raw TT-cross cores once per `(seed,budget)`
+pair, then reapplies the untruncated control and the `1e-10`, `1e-8` and `1e-6`
+truncations to those identical cores.  Any resulting Greek variation is
+therefore attributable to truncation rather than to a new stochastic fit.  A
+scale-sensitivity audit for near-zero cross-Gamma signs is also stored.  See
+`V9_4_1_RUN_COMMANDS.md`.
+
 ## Version 9.4: QTT reconstruction convergence for Greeks
 
 Version 9.4 reintroduces QTT-cross only after the v9.3 five-asset Greek gate.

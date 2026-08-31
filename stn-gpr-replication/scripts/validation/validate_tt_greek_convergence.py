@@ -19,6 +19,7 @@ from stngpr.convergence import (
     COMPONENTS,
     component_metrics,
     components_to_json,
+    cross_gamma_sign_diagnostics,
     finite_difference_component_arrays,
     finite_difference_hybrid_component_arrays,
     full_hessian_error_metrics,
@@ -124,6 +125,18 @@ def _decomposition_metrics(analytical, exact_fd, grid_fd, tt_fd):
         for name in COMPONENTS
     }
     return output
+
+
+def _sign_sensitivity(reference, estimate, labels):
+    return {
+        f"{tolerance:.0e}": cross_gamma_sign_diagnostics(
+            reference["cross_gamma"],
+            estimate["cross_gamma"],
+            labels=labels["cross_gamma"],
+            relative_zero_tolerance=tolerance,
+        )
+        for tolerance in (1e-4, 5e-4, 1e-3)
+    }
 
 
 def _acceptance(diagnostics):
@@ -278,7 +291,7 @@ def main():
     parser.add_argument("--profile", choices=PROFILES, default="smoke")
     parser.add_argument(
         "--campaign",
-        choices=("budget", "seeds", "all"),
+        choices=("budget", "seeds", "all", "matrix"),
         default="budget",
     )
     parser.add_argument("--budgets", nargs="+", type=int, default=None)
@@ -334,10 +347,14 @@ def main():
         requested_runs = [(budget, tt_seeds[0]) for budget in budgets]
     elif args.campaign == "seeds":
         requested_runs = [(retained_budget, seed) for seed in tt_seeds]
-    else:
+    elif args.campaign == "all":
         requested_runs = [(budget, tt_seeds[0]) for budget in budgets]
         requested_runs.extend((retained_budget, seed) for seed in tt_seeds)
         requested_runs = list(dict.fromkeys(requested_runs))
+    else:
+        requested_runs = [
+            (budget, seed) for budget in budgets for seed in tt_seeds
+        ]
 
     base = PaperConfig()
     shape = list(base.physical_shape)
@@ -534,6 +551,14 @@ def main():
         }
         _write_checkpoint(args.output, payload)
 
+    for record in payload["runs"].values():
+        if "cross_gamma_sign_sensitivity" not in record:
+            record["cross_gamma_sign_sensitivity"] = _sign_sensitivity(
+                analytical,
+                record["components"],
+                component_labels,
+            )
+
     for budget, tt_seed in requested_runs:
         run_key = f"seed_{int(tt_seed)}__budget_{int(budget)}"
         if run_key in payload["runs"]:
@@ -599,6 +624,11 @@ def main():
             "greek_evaluation_time_seconds": evaluation_time,
             "components": components_to_json(tt_fd),
             **diagnostics,
+            "cross_gamma_sign_sensitivity": _sign_sensitivity(
+                analytical,
+                tt_fd,
+                component_labels,
+            ),
             "error_against_grid_oracle": {
                 "components": component_metrics(grid_fd, tt_fd),
                 "full_hessian": full_hessian_error_metrics(grid_fd, tt_fd),

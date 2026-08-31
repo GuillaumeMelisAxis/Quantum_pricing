@@ -1,3 +1,56 @@
+# Version 9.5 — Greek-aware multi-seed truncation
+
+V9.5 tests whether the untruncated 200k TT-cross approximation is robust across
+the five frozen seeds and determines how much compression can be applied
+without losing derivative information.  A single raw fit is performed for
+each seed.  All truncation variants therefore share the same underlying TT
+cores and differ only through the post-processing tolerance.
+
+The paper profile uses
+
+- budget: `200000`;
+- seeds: `20260401` to `20260405`;
+- truncations: raw, `1e-14`, `1e-12`, `1e-10`, `1e-8`;
+- the v9.4 bounded standardized-risk coordinate;
+- the same 60-point analytical five-asset Greek panel;
+- material cross-Gamma sign tolerance: `5e-4`.
+
+The JSON reports mean, standard deviation, range and worst-seed errors for each
+tolerance.  A tolerance is robustly accepted only if every requested seed
+passes every Greek-aware criterion.  Among robust candidates, the code selects
+the one with the smallest mean retained parameter fraction.  See
+`V9_5_RUN_COMMANDS.md`.
+
+# Version 9.4.1 — budget-seed and truncation stability
+
+The v9.4 paper campaign identified a stable 150k candidate but did not establish
+monotone budget convergence: for seed 20260401 the post-truncation effective
+rank fell between 150k and 200k while the price error remained unchanged and
+the Hessian error increased.  V9.4.1 tests whether this is a seed-specific
+trajectory or a systematic derivative-sensitivity effect.
+
+The first experiment completes the Cartesian matrix
+
+```text
+budgets = {100k, 150k, 200k}
+seeds   = {20260401, ..., 20260405}.
+```
+
+It retains the same 60-point paper panel, bounded standardized-risk grid,
+0.2% fixed-strike bump and risk-hybrid cubic interpolation.  Existing v9.4
+runs are reused, leaving only eight missing `(budget,seed)` pairs.
+
+The second experiment separates TT-cross construction from SVD-style
+truncation.  For each requested fit, raw cross cores are frozen and the Greek
+audit is repeated after truncations `none`, `1e-10`, `1e-8` and `1e-6`.  Ranks,
+parameter retention, price/Greek errors, full-Hessian error, PSD diagnostics
+and errors relative to the untruncated TT are stored.  This directly tests the
+hypothesis that modes negligible in the price norm remain material after two
+spot differentiations.
+
+Dense 101--201 point moneyness curves are deliberately deferred until this gate
+selects a robust budget and truncation rule.  See `V9_4_1_RUN_COMMANDS.md`.
+
 # Version 9.4 — QTT budget and seed convergence
 
 V9.4 is the first TT-compressed experiment after the grid-only v9.0--v9.3

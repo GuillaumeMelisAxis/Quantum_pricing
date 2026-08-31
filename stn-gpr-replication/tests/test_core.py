@@ -51,6 +51,7 @@ from stngpr.risk_grids import (
     build_greek_coordinate_grid,
     gamma_monitor_axis,
 )
+from stngpr.tt_surrogate import TTPriceSurrogate
 from stngpr.validation import (
     american_put_binomial,
     black_scholes_put,
@@ -74,6 +75,24 @@ class GridTests(unittest.TestCase):
         corners, weights = grid.multilinear_stencil(np.array([[0.31, 0.77]]))
         self.assertEqual(corners.shape, (1, 4, 2))
         self.assertAlmostEqual(float(weights.sum()), 1.0)
+
+    def test_tt_truncation_can_be_reapplied_from_raw_cores(self):
+        grid = QTTGrid(axes=(np.array([0.0, 1.0]), np.array([0.0, 1.0])))
+        model = TTPriceSurrogate(grid, lambda points: np.sum(points, axis=1))
+        model.untruncated_cores = [
+            np.ones((1, 2, 1)),
+            np.ones((1, 2, 1)),
+        ]
+        raw = model.apply_truncation(None)
+        truncated = model.apply_truncation(1e-12)
+        self.assertEqual(raw.parameter_count, 4)
+        self.assertEqual(truncated.parameter_count, 4)
+        self.assertIsNone(raw.truncation)
+        self.assertEqual(truncated.truncation, 1e-12)
+        self.assertEqual(raw.bond_ranks, [1])
+        self.assertEqual(raw.core_shapes, [[1, 2, 1], [1, 2, 1]])
+        with self.assertRaises(ValueError):
+            model.apply_truncation(-1e-8)
 
     def test_nonuniform_grid_interpolates_linear_function_exactly(self):
         grid = QTTGrid(axes=(np.array([0.0, 0.1, 0.4, 1.0]), np.array([0.0, 0.2, 1.0, 3.0])))

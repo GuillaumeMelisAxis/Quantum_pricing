@@ -17,6 +17,20 @@ class FitDiagnostics:
     effective_rank: float
     maximum_rank: int
     parameter_count: int
+    pre_truncation_effective_rank: float
+    pre_truncation_maximum_rank: int
+    pre_truncation_parameter_count: int
+    truncation: float | None
+
+
+@dataclass
+class CoreDiagnostics:
+    effective_rank: float
+    maximum_rank: int
+    parameter_count: int
+    truncation: float | None
+    bond_ranks: list[int]
+    core_shapes: list[list[int]]
 
 
 class TTPriceSurrogate:
@@ -27,6 +41,7 @@ class TTPriceSurrogate:
         self.pricer = pricer
         self.seed = int(seed)
         self.cores = None
+        self.untruncated_cores = None
         self.diagnostics = None
 
     @staticmethod
@@ -40,13 +55,40 @@ class TTPriceSurrogate:
     def _evaluate_qtt(self, qtt_indices: np.ndarray) -> np.ndarray:
         return self.pricer(self.grid.qtt_indices_to_points(qtt_indices))
 
+    @classmethod
+    def _core_diagnostics(cls, cores, truncation=None) -> CoreDiagnostics:
+        teneva = cls._teneva()
+        return CoreDiagnostics(
+            effective_rank=float(teneva.erank(cores)),
+            maximum_rank=int(max(core.shape[-1] for core in cores[:-1])),
+            parameter_count=int(sum(core.size for core in cores)),
+            truncation=None if truncation is None else float(truncation),
+            bond_ranks=[int(core.shape[-1]) for core in cores[:-1]],
+            core_shapes=[[int(value) for value in core.shape] for core in cores],
+        )
+
+    def apply_truncation(self, truncation: float | None) -> CoreDiagnostics:
+        """Reset the fitted cores from the raw cross output and truncate them."""
+        if self.untruncated_cores is None:
+            raise RuntimeError("fit the surrogate first")
+        source = [core.copy() for core in self.untruncated_cores]
+        if truncation is None or float(truncation) == 0.0:
+            self.cores = source
+            applied = None
+        else:
+            if float(truncation) < 0.0:
+                raise ValueError("truncation must be non-negative")
+            self.cores = self._teneva().truncate(source, float(truncation))
+            applied = float(truncation)
+        return self._core_diagnostics(self.cores, applied)
+
     def fit(
         self,
         max_evals: int,
         anova_samples: int = 2_000,
         max_sweeps: int = 20,
         rank_increment: int = 2,
-        truncation: float = 1e-8,
+        truncation: float | None = 1e-8,
         log: bool = True,
     ) -> FitDiagnostics:
         teneva = self._teneva()
@@ -58,7 +100,7 @@ class TTPriceSurrogate:
 
         info, cache = {}, {}
         start = perf_counter()
-        self.cores = teneva.cross(
+        raw_cores = teneva.cross(
             self._evaluate_qtt,
             y0,
             m=int(max_evals),
@@ -69,16 +111,25 @@ class TTPriceSurrogate:
             cache=cache,
             log=log,
         )
-        self.cores = teneva.truncate(self.cores, truncation)
+        self.untruncated_cores = [core.copy() for core in raw_cores]
+        pre_truncation = self._core_diagnostics(
+            self.untruncated_cores,
+            truncation=None,
+        )
+        post_truncation = self.apply_truncation(truncation)
         wall_time = perf_counter() - start
         self.diagnostics = FitDiagnostics(
             wall_time=wall_time,
             function_evaluations=int(info.get("m", 0)) + int(anova_samples),
             sweeps=int(info.get("nswp", 0)),
             stop=str(info.get("stop", "unknown")),
-            effective_rank=float(teneva.erank(self.cores)),
-            maximum_rank=int(max(core.shape[-1] for core in self.cores[:-1])),
-            parameter_count=int(sum(core.size for core in self.cores)),
+            effective_rank=post_truncation.effective_rank,
+            maximum_rank=post_truncation.maximum_rank,
+            parameter_count=post_truncation.parameter_count,
+            pre_truncation_effective_rank=pre_truncation.effective_rank,
+            pre_truncation_maximum_rank=pre_truncation.maximum_rank,
+            pre_truncation_parameter_count=pre_truncation.parameter_count,
+            truncation=post_truncation.truncation,
         )
         return self.diagnostics
 
