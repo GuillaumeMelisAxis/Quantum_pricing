@@ -125,6 +125,40 @@ def finite_difference_hybrid_component_arrays(
     }
 
 
+def finite_difference_fixed_hybrid_component_arrays(
+    interpolator,
+    transform,
+    points,
+    risk_columns,
+    relative_bump,
+    cubic_columns,
+):
+    """Greeks obtained from one fixed tensor-product interpolant.
+
+    Unlike ``finite_difference_hybrid_component_arrays``, every price in every
+    finite-difference stencil is evaluated with the same cubic axes.  The
+    returned gradient and Hessian are therefore derivatives of one scalar
+    reconstructed price surface.
+    """
+    fixed_columns = tuple(int(column) for column in cubic_columns)
+    if len(set(fixed_columns)) != len(fixed_columns):
+        raise ValueError("cubic_columns must be unique")
+
+    def market_pricer(market_points):
+        model_points = transform.to_model(market_points)
+        return interpolator(
+            model_points,
+            cubic_columns=fixed_columns,
+        )
+
+    return finite_difference_component_arrays(
+        market_pricer,
+        points,
+        risk_columns,
+        relative_bump,
+    )
+
+
 def mean_and_standard_error(replications):
     mean, standard_error = {}, {}
     for name in COMPONENTS:

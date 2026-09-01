@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -49,7 +50,9 @@ class TTPriceSurrogate:
         try:
             import teneva
         except ImportError as exc:
-            raise RuntimeError("Install the project dependencies: pip install -e .") from exc
+            raise RuntimeError(
+                "Install the project dependencies: pip install -e ."
+            ) from exc
         return teneva
 
     def _evaluate_qtt(self, qtt_indices: np.ndarray) -> np.ndarray:
@@ -81,6 +84,42 @@ class TTPriceSurrogate:
             self.cores = self._teneva().truncate(source, float(truncation))
             applied = float(truncation)
         return self._core_diagnostics(self.cores, applied)
+
+    def save_untruncated_cores(self, path: str | Path) -> Path:
+        """Persist the raw TT-cross cores for controlled truncation studies."""
+        if self.untruncated_cores is None:
+            raise RuntimeError("fit the surrogate first")
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            target,
+            **{
+                f"core_{index:03d}": np.asarray(core, dtype=float)
+                for index, core in enumerate(self.untruncated_cores)
+            },
+        )
+        return target
+
+    def load_untruncated_cores(self, path: str | Path) -> CoreDiagnostics:
+        """Restore raw cores and validate their QTT rank connectivity."""
+        source = Path(path)
+        with np.load(source, allow_pickle=False) as archive:
+            names = sorted(archive.files)
+            expected = [f"core_{index:03d}" for index in range(sum(self.grid.bits))]
+            if names != expected:
+                raise ValueError("core archive is incompatible with this QTT grid")
+            cores = [np.asarray(archive[name], dtype=float) for name in names]
+        for index, core in enumerate(cores):
+            if core.ndim != 3 or core.shape[1] != 2:
+                raise ValueError("every QTT core must have shape (r_left,2,r_right)")
+            if index == 0 and core.shape[0] != 1:
+                raise ValueError("the first QTT core must have left rank one")
+            if index and cores[index - 1].shape[2] != core.shape[0]:
+                raise ValueError("adjacent QTT core ranks are inconsistent")
+        if cores[-1].shape[2] != 1:
+            raise ValueError("the last QTT core must have right rank one")
+        self.untruncated_cores = [core.copy() for core in cores]
+        return self.apply_truncation(None)
 
     def fit(
         self,

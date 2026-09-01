@@ -1,3 +1,79 @@
+# Version 9.8 — final pricing-grid versus risk-grid comparison
+
+The final experiment is restricted to the analytically controlled European
+geometric-basket put. It compares two grids:
+
+1. the paper-I price-adaptive sinh log-moneyness grid;
+2. the bounded standardized-risk grid selected for coherent Greeks.
+
+The first stage gives both coordinates identical physical mode sizes and uses
+exact grid-node prices. This isolates node placement from TT reconstruction
+and architecture size. The second stage restores the native configurations
+`32^5 x 64 x 8 x 8` and `64^5 x 512 x 8 x 64`, fits raw TT-cross cores with
+paired seeds and derives price, Delta and Hessian from one scalar cubic surface.
+
+Report the matched and native stages separately. The former supports a causal
+coordinate statement; the latter reports the actual accuracy--complexity
+trade-off. No arithmetic or American result is inferred from this benchmark.
+
+See `V9_8_RUN_COMMANDS.md` for the resumable Windows commands.
+
+# Version 9.7 — local Greek-aware truncation selection
+
+V9.6 established that the bounded standardized-risk grid and a single cubic
+interpolant can produce accurate price, Delta and full spot Hessian estimates.
+It also showed that the `1e-8` price-norm truncation passes aggregate error
+criteria while failing locally at seven days.  V9.7 locates the admissible
+compression boundary.
+
+The paper profile fits one raw 200k TT for each seed 20260401--20260405 and
+applies
+
+```text
+raw, 1e-14, 1e-12, 1e-11, 1e-10, 1e-9, 1e-8
+```
+
+to the same raw cores.  A two-stage protocol controls runtime without changing
+the selection rule:
+
+1. all seed–tolerance pairs are screened with the previously validated
+   component-hybrid operator;
+2. robust candidates are considered from most to least compressed and tested
+   across every seed with the unified scalar cubic interpolant;
+3. the first candidate passing the unified global and local gates is selected;
+4. the immediately more aggressive rejected tolerance is evaluated as a
+   boundary control.
+
+The local gate requires worst-curve diagonal- and cross-Gamma errors below
+2.5% and worst-point errors below 10%.  Global price, Delta, Gamma, Hessian,
+PSD and material cross-Gamma sign criteria from v9.6 are retained.  Raw core
+archives and JSON checkpoints make every phase resumable.
+
+# Version 9.6 — scalar interpolant consistency and local Greek gate
+
+V9.6 tests whether the Greek engine differentiates one well-defined price
+surface.  This distinction matters because the v9.2--v9.5 component-hybrid
+rule chose different cubic axes for price, Delta, diagonal Gamma and cross-
+Gamma.  Its individual components can be accurate without forming the
+gradient and Hessian of a single scalar interpolant.
+
+The experiment freezes the bounded standardized-risk grid and seed 20260401,
+the worst compressed seed in v9.5.  Four interpolation operators are applied
+to identical exact-grid or TT nodal values:
+
+- multilinear on every physical coordinate;
+- cubic only on the bounded risk-coordinate axis;
+- the former component-dependent hybrid control;
+- one unified interpolant, cubic on all five spot axes and the bounded risk
+  coordinate, and linear in rate and maturity.
+
+The paper profile evaluates the exact-grid interpolation floor, an untruncated
+200k TT and the same cores truncated at `1e-8`.  Global normalized MAEs,
+full-Hessian error, PSD and material-sign diagnostics are retained.  The new
+local gate additionally requires worst-curve Gamma errors below 2.5% and
+worst-point errors below 10% across the selected `(m,T)` panel.  Among fixed
+scalar interpolants that pass every gate, the code selects the fastest.
+
 # Version 9.5 — Greek-aware multi-seed truncation
 
 V9.5 tests whether the untruncated 200k TT-cross approximation is robust across

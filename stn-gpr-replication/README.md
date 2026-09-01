@@ -1,5 +1,51 @@
 # STN-GPR replication
 
+## Version 9.8: final pricing-grid versus risk-grid comparison
+
+Version 9.8 closes the controlled European geometric-basket Greek programme.
+It compares the paper-I price-adaptive log-moneyness grid with the final bounded
+standardized-risk grid in two complementary experiments:
+
+- an exact-grid, matched-resolution coordinate ablation;
+- a native-architecture raw-TT comparison over common seeds and oracle budgets.
+
+The production comparison derives price, all five spot Deltas and the complete
+`5 x 5` fixed-strike Hessian from one unified scalar cubic surface. It retains
+the v9.7 decision not to apply post-fit price-norm truncation. A dense 30-day
+profile makes `Delta_1`, `Gamma_1,1` and `Gamma_1,2` visually auditable.
+
+European arithmetic and American products are explicitly outside the v9.8
+scope. See `V9_8_RUN_COMMANDS.md` and `CHANGELOG_V9_8.md`.
+
+## Version 9.7: Greek-aware truncation selection
+
+Version 9.7 determines the largest TT truncation that remains admissible for a
+risk engine.  Every tolerance is applied to identical raw 200k TT-cross cores
+and screened over five seeds with both global and local maturity–moneyness
+criteria.  The most compressed robust candidates are then certified with the
+v9.6 unified scalar cubic price surface.
+
+The implementation persists raw TT cores and checkpoints every completed
+variant.  Long paper runs can therefore resume without refitting completed
+seeds.  The first rejected tolerance is retained as a boundary control, so the
+selection demonstrates both acceptance and failure rather than reporting only
+the winning configuration.  See `V9_7_RUN_COMMANDS.md`.
+
+## Version 9.6: one price surface for prices and Greeks
+
+Version 9.6 audits a requirement that aggregate error tables alone cannot
+establish: price, Delta and the complete spot Hessian should be finite-
+difference derivatives of the same interpolated scalar TT price surface.  It
+compares multilinear interpolation, cubic interpolation along the bounded
+risk coordinate, the previous component-dependent hybrid rule and one fixed
+cubic rule on all five spot coordinates plus the bounded risk coordinate.
+
+The exact-grid oracle isolates the interpolation floor before TT-cross is
+introduced.  The raw 200k fit is retained as the accuracy reference and the
+`1e-8` truncation as the compressed candidate.  Acceptance now combines the
+existing global price/Greek/Hessian tests with worst-slice and worst-point
+criteria in the `(m,T)` plane.  See `V9_6_RUN_COMMANDS.md`.
+
 ## Version 9.5: Greek-aware multi-seed truncation
 
 Version 9.5 closes the price-norm truncation investigation on the selected
