@@ -1,3 +1,217 @@
+# Version 9.8 — final pricing-grid versus risk-grid comparison
+
+The final experiment is restricted to the analytically controlled European
+geometric-basket put. It compares two grids:
+
+1. the paper-I price-adaptive sinh log-moneyness grid;
+2. the bounded standardized-risk grid selected for coherent Greeks.
+
+The first stage gives both coordinates identical physical mode sizes and uses
+exact grid-node prices. This isolates node placement from TT reconstruction
+and architecture size. The second stage restores the native configurations
+`32^5 x 64 x 8 x 8` and `64^5 x 512 x 8 x 64`, fits raw TT-cross cores with
+paired seeds and derives price, Delta and Hessian from one scalar cubic surface.
+
+Report the matched and native stages separately. The former supports a causal
+coordinate statement; the latter reports the actual accuracy--complexity
+trade-off. No arithmetic or American result is inferred from this benchmark.
+
+See `V9_8_RUN_COMMANDS.md` for the resumable Windows commands.
+
+# Version 9.7 — local Greek-aware truncation selection
+
+V9.6 established that the bounded standardized-risk grid and a single cubic
+interpolant can produce accurate price, Delta and full spot Hessian estimates.
+It also showed that the `1e-8` price-norm truncation passes aggregate error
+criteria while failing locally at seven days.  V9.7 locates the admissible
+compression boundary.
+
+The paper profile fits one raw 200k TT for each seed 20260401--20260405 and
+applies
+
+```text
+raw, 1e-14, 1e-12, 1e-11, 1e-10, 1e-9, 1e-8
+```
+
+to the same raw cores.  A two-stage protocol controls runtime without changing
+the selection rule:
+
+1. all seed–tolerance pairs are screened with the previously validated
+   component-hybrid operator;
+2. robust candidates are considered from most to least compressed and tested
+   across every seed with the unified scalar cubic interpolant;
+3. the first candidate passing the unified global and local gates is selected;
+4. the immediately more aggressive rejected tolerance is evaluated as a
+   boundary control.
+
+The local gate requires worst-curve diagonal- and cross-Gamma errors below
+2.5% and worst-point errors below 10%.  Global price, Delta, Gamma, Hessian,
+PSD and material cross-Gamma sign criteria from v9.6 are retained.  Raw core
+archives and JSON checkpoints make every phase resumable.
+
+# Version 9.6 — scalar interpolant consistency and local Greek gate
+
+V9.6 tests whether the Greek engine differentiates one well-defined price
+surface.  This distinction matters because the v9.2--v9.5 component-hybrid
+rule chose different cubic axes for price, Delta, diagonal Gamma and cross-
+Gamma.  Its individual components can be accurate without forming the
+gradient and Hessian of a single scalar interpolant.
+
+The experiment freezes the bounded standardized-risk grid and seed 20260401,
+the worst compressed seed in v9.5.  Four interpolation operators are applied
+to identical exact-grid or TT nodal values:
+
+- multilinear on every physical coordinate;
+- cubic only on the bounded risk-coordinate axis;
+- the former component-dependent hybrid control;
+- one unified interpolant, cubic on all five spot axes and the bounded risk
+  coordinate, and linear in rate and maturity.
+
+The paper profile evaluates the exact-grid interpolation floor, an untruncated
+200k TT and the same cores truncated at `1e-8`.  Global normalized MAEs,
+full-Hessian error, PSD and material-sign diagnostics are retained.  The new
+local gate additionally requires worst-curve Gamma errors below 2.5% and
+worst-point errors below 10% across the selected `(m,T)` panel.  Among fixed
+scalar interpolants that pass every gate, the code selects the fastest.
+
+# Version 9.5 — Greek-aware multi-seed truncation
+
+V9.5 tests whether the untruncated 200k TT-cross approximation is robust across
+the five frozen seeds and determines how much compression can be applied
+without losing derivative information.  A single raw fit is performed for
+each seed.  All truncation variants therefore share the same underlying TT
+cores and differ only through the post-processing tolerance.
+
+The paper profile uses
+
+- budget: `200000`;
+- seeds: `20260401` to `20260405`;
+- truncations: raw, `1e-14`, `1e-12`, `1e-10`, `1e-8`;
+- the v9.4 bounded standardized-risk coordinate;
+- the same 60-point analytical five-asset Greek panel;
+- material cross-Gamma sign tolerance: `5e-4`.
+
+The JSON reports mean, standard deviation, range and worst-seed errors for each
+tolerance.  A tolerance is robustly accepted only if every requested seed
+passes every Greek-aware criterion.  Among robust candidates, the code selects
+the one with the smallest mean retained parameter fraction.  See
+`V9_5_RUN_COMMANDS.md`.
+
+# Version 9.4.1 — budget-seed and truncation stability
+
+The v9.4 paper campaign identified a stable 150k candidate but did not establish
+monotone budget convergence: for seed 20260401 the post-truncation effective
+rank fell between 150k and 200k while the price error remained unchanged and
+the Hessian error increased.  V9.4.1 tests whether this is a seed-specific
+trajectory or a systematic derivative-sensitivity effect.
+
+The first experiment completes the Cartesian matrix
+
+```text
+budgets = {100k, 150k, 200k}
+seeds   = {20260401, ..., 20260405}.
+```
+
+It retains the same 60-point paper panel, bounded standardized-risk grid,
+0.2% fixed-strike bump and risk-hybrid cubic interpolation.  Existing v9.4
+runs are reused, leaving only eight missing `(budget,seed)` pairs.
+
+The second experiment separates TT-cross construction from SVD-style
+truncation.  For each requested fit, raw cross cores are frozen and the Greek
+audit is repeated after truncations `none`, `1e-10`, `1e-8` and `1e-6`.  Ranks,
+parameter retention, price/Greek errors, full-Hessian error, PSD diagnostics
+and errors relative to the untruncated TT are stored.  This directly tests the
+hypothesis that modes negligible in the price norm remain material after two
+spot differentiations.
+
+Dense 101--201 point moneyness curves are deliberately deferred until this gate
+selects a robust budget and truncation rule.  See `V9_4_1_RUN_COMMANDS.md`.
+
+# Version 9.4 — QTT budget and seed convergence
+
+V9.4 is the first TT-compressed experiment after the grid-only v9.0--v9.3
+sequence.  It uses the European geometric-basket put, the full 51-price
+fixed-strike stencil, three out-of-sample spot panels, four maturities and five
+log-moneyness levels.  Requested QTT-cross budgets are 20k, 50k, 100k, 150k and
+200k; the actual oracle count, including ANOVA initialization and the final
+cross batch, is always reported.
+
+The initial implementation revealed a domain pathology before any paper run:
+the unbounded coordinate
+
+```text
+z = asinh((m - ridge(r,T)) / (sigma_B sqrt(T)))
+```
+
+is well behaved locally but its global extrema cannot be crossed with every
+maturity in one Cartesian tensor.  Extreme short-maturity `z` values combined
+with long maturities produced economically meaningless log-moneyness and
+destabilized TT-ANOVA.  V9.4 maps the maturity-dependent standardized interval
+to `[-1,1]`, so both endpoints recover the fixed global moneyness bounds at
+every `(r,T)`.  The coordinate remains concentrated in standardized risk while
+the complete tensor stays inside the pricing domain.
+
+For every TT run, the stored residuals satisfy componentwise
+
+```text
+TT FD - analytical
+  = (exact-price FD - analytical)
+  + (grid FD - exact-price FD)
+  + (TT FD - grid FD).
+```
+
+The paper campaign contains one full budget sweep and five independent seeds
+at the retained 150k budget.  Acceptance is based on total price/Greek error,
+full-Hessian Frobenius error, material cross-Gamma sign agreement and the
+relative norm of the negative Hessian part.  See `V9_4_RUN_COMMANDS.md`.
+
+# Version 9.3 — complete five-asset Hessian gate
+
+The v9.3 experiment is the last grid-only gate before TT compression is
+reintroduced.  It keeps the v9.2 numerical choices fixed and expands the
+finite-difference stencil from two selected spot factors to all five factors.
+Each market point therefore requires 51 fixed-strike prices and yields five
+Deltas plus the fifteen independent entries of the symmetric 5x5 Hessian.
+
+The experiment does not impose non-negative cross-Gammas.  For a geometric
+basket, the analytical cross-Gamma can be negative because the basket map is
+concave in the individual spots.  Instead, v9.3 measures sign agreement away
+from near-zero tails and tests positive semidefiniteness of the full Hessian
+with both absolute and scale-aware diagnostics.
+
+The paper profile uses 101 moneyness values in `[-0.35, 0.35]`, maturities of
+3, 7, 30 and 90 days and all three out-of-sample spot panels.  No TT or Monte
+Carlo layer is present.  See `V9_3_RUN_COMMANDS.md`.
+
+# Version 9.2.1 — dense functional audit
+
+The v9.2.1 experiment is not another aggregate benchmark.  It samples 201
+uniform log-moneyness values in `[-0.35, 0.35]` on each paper-profile curve and
+stores analytical, exact-price finite-difference, multilinear and risk-hybrid
+cubic Greeks.  The requested 3-, 7-, 30- and 90-day maturities are evaluated as
+market values rather than snapped to maturity-grid nodes.  Its purpose is to
+detect hidden overshoots or oscillations between the sparse v9.2 control
+points.  See `V9_2_1_RUN_COMMANDS.md`.
+
+# Version 9.2 — residual Greek error floor
+
+The v9.2 gate freezes the `standardized_risk` coordinate and the v9.1 choice
+of 64 nodes on every spot axis.  It then varies only the relative finite-
+difference bump and the interpolation rule on three off-grid spot panels not
+used by v9.1.  The European geometric basket provides exact prices and exact
+fixed-strike Greeks, so every reported residual satisfies
+
+```text
+grid FD - analytical
+  = (exact-price FD - analytical) + (grid FD - exact-price FD).
+```
+
+The first term is the numerical differentiation layer and the second is the
+grid-interpolation layer.  TT reconstruction and Monte Carlo noise remain
+disabled.  The paper gate covers five bumps, six maturity buckets, seven
+log-moneyness levels and both multilinear and risk-hybrid cubic interpolation.
+See `V9_2_RUN_COMMANDS.md` for the exact commands.
+
 # Experimental protocol
 
 ## Stage 0 - Reproducibility contract

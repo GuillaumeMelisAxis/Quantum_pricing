@@ -1,11 +1,26 @@
-from dataclasses import replace
 import math
 import unittest
+from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
 from stngpr.baselines import ManhattanLaplacian
 from stngpr.config import PaperConfig
+from stngpr.convergence import (
+    columnwise_error_metrics,
+    component_error_decomposition,
+    component_residual_metrics,
+    cross_gamma_sign_diagnostics,
+    curve_error_diagnostics,
+    finite_difference_component_arrays,
+    finite_difference_fixed_hybrid_component_arrays,
+    full_hessian_error_metrics,
+    gamma_matrices,
+    mean_and_standard_error,
+    tt_component_error_decomposition,
+)
 from stngpr.coordinates import (
     CachedGridInterpolator,
     CoordinateTransform,
@@ -14,12 +29,6 @@ from stngpr.coordinates import (
     build_coordinate_grid,
     oracle_hybrid_cubic_predict,
     oracle_multilinear_predict,
-)
-from stngpr.convergence import (
-    finite_difference_component_arrays,
-    finite_difference_hybrid_component_arrays,
-    gamma_matrices,
-    mean_and_standard_error,
 )
 from stngpr.diagnostics import (
     geometric_basket_convexity_ridge,
@@ -40,10 +49,12 @@ from stngpr.pricers import (
 )
 from stngpr.risk import var_es
 from stngpr.risk_grids import (
+    BoundedStandardizedRiskTransform,
     StandardizedRiskTransform,
     build_greek_coordinate_grid,
     gamma_monitor_axis,
 )
+from stngpr.tt_surrogate import TTPriceSurrogate
 from stngpr.validation import (
     american_put_binomial,
     black_scholes_put,
@@ -68,31 +79,50 @@ class GridTests(unittest.TestCase):
         self.assertEqual(corners.shape, (1, 4, 2))
         self.assertAlmostEqual(float(weights.sum()), 1.0)
 
+    def test_tt_truncation_can_be_reapplied_from_raw_cores(self):
+        grid = QTTGrid(axes=(np.array([0.0, 1.0]), np.array([0.0, 1.0])))
+        model = TTPriceSurrogate(grid, lambda points: np.sum(points, axis=1))
+        model.untruncated_cores = [
+            np.ones((1, 2, 1)),
+            np.ones((1, 2, 1)),
+        ]
+        raw = model.apply_truncation(None)
+        truncated = model.apply_truncation(1e-12)
+        self.assertEqual(raw.parameter_count, 4)
+        self.assertEqual(truncated.parameter_count, 4)
+        self.assertIsNone(raw.truncation)
+        self.assertEqual(truncated.truncation, 1e-12)
+        self.assertEqual(raw.bond_ranks, [1])
+        self.assertEqual(raw.core_shapes, [[1, 2, 1], [1, 2, 1]])
+        with self.assertRaises(ValueError):
+            model.apply_truncation(-1e-8)
+
     def test_nonuniform_grid_interpolates_linear_function_exactly(self):
-        grid = QTTGrid(axes=(np.array([0.0, 0.1, 0.4, 1.0]), np.array([0.0, 0.2, 1.0, 3.0])))
+        grid = QTTGrid(
+            axes=(np.array([0.0, 0.1, 0.4, 1.0]), np.array([0.0, 0.2, 1.0, 3.0]))
+        )
         points = np.array([[0.25, 0.7], [0.9, 2.4]])
         pricer = lambda x: 2.0 + 3.0 * x[:, 0] - 0.5 * x[:, 1]
         predicted = oracle_multilinear_predict(grid, pricer, points)
         np.testing.assert_allclose(predicted, pricer(points), atol=1e-14)
 
     def test_hybrid_cubic_interpolates_cubic_linear_function_exactly(self):
-        grid = QTTGrid(axes=(
-            np.array([-1.0, -0.7, -0.2, 0.1, 0.4, 0.8, 1.3, 2.0]),
-            np.array([0.0, 0.3, 1.1, 3.0]),
-        ))
-        points = np.array([
-            [-0.45, 0.7],
-            [0.25, 1.8],
-            [1.05, 2.4],
-        ])
+        grid = QTTGrid(
+            axes=(
+                np.array([-1.0, -0.7, -0.2, 0.1, 0.4, 0.8, 1.3, 2.0]),
+                np.array([0.0, 0.3, 1.1, 3.0]),
+            )
+        )
+        points = np.array(
+            [
+                [-0.45, 0.7],
+                [0.25, 1.8],
+                [1.05, 2.4],
+            ]
+        )
 
         def pricer(x):
-            return (
-                1.0
-                + x[:, 0] ** 3
-                + 0.5 * x[:, 0] ** 2 * x[:, 1]
-                - 2.0 * x[:, 1]
-            )
+            return 1.0 + x[:, 0] ** 3 + 0.5 * x[:, 0] ** 2 * x[:, 1] - 2.0 * x[:, 1]
 
         predicted = oracle_hybrid_cubic_predict(
             grid,
@@ -102,11 +132,67 @@ class GridTests(unittest.TestCase):
         )
         np.testing.assert_allclose(predicted, pricer(points), atol=2e-14)
 
+    def test_fixed_hybrid_greeks_derive_one_cubic_surface(self):
+        grid = QTTGrid(
+            axes=(
+                np.linspace(0.5, 2.0, 8),
+                np.linspace(-1.0, 1.0, 8),
+            )
+        )
+
+        class IdentityTransform:
+            n_assets = 1
+
+            @staticmethod
+            def to_model(points):
+                return np.asarray(points, dtype=float)
+
+        def oracle(points, cubic_columns=()):
+            return oracle_hybrid_cubic_predict(
+                grid,
+                lambda values: values[:, 0] ** 3 + values[:, 1],
+                points,
+                cubic_columns=cubic_columns,
+            )
+
+        point = np.array([[1.1, 0.2]])
+        result = finite_difference_fixed_hybrid_component_arrays(
+            oracle,
+            IdentityTransform(),
+            point,
+            risk_columns=(0,),
+            relative_bump=1e-3,
+            cubic_columns=(0,),
+        )
+        np.testing.assert_allclose(result["delta"], [[3.0 * 1.1**2]], atol=2e-6)
+        np.testing.assert_allclose(result["gamma_diagonal"], [[6.0 * 1.1]], atol=1e-8)
+
+    def test_raw_tt_core_archive_round_trip(self):
+        grid = QTTGrid(axes=(np.linspace(0.0, 1.0, 4),))
+        model = TTPriceSurrogate(grid, lambda points: points[:, 0])
+        model.untruncated_cores = [
+            np.arange(4.0).reshape(1, 2, 2),
+            np.arange(4.0, 8.0).reshape(2, 2, 1),
+        ]
+        with TemporaryDirectory() as directory:
+            path = model.save_untruncated_cores(Path(directory) / "raw_cores.npz")
+            restored = TTPriceSurrogate(grid, lambda points: points[:, 0])
+            diagnostics = restored.load_untruncated_cores(path)
+        self.assertEqual(diagnostics.parameter_count, 8)
+        for expected, actual in zip(
+            model.untruncated_cores,
+            restored.untruncated_cores,
+            strict=True,
+        ):
+            np.testing.assert_array_equal(actual, expected)
+
     def test_cached_grid_interpolator_reuses_exact_node_values(self):
-        grid = QTTGrid(axes=(
-            np.array([-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5]),
-            np.array([0.0, 0.25, 0.5, 1.0]),
-        ))
+        grid = QTTGrid(
+            axes=(
+                np.array([-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5]),
+                np.array([0.0, 0.25, 0.5, 1.0]),
+            )
+        )
         calls = {"count": 0}
 
         def oracle(x):
@@ -162,7 +248,9 @@ class GridTests(unittest.TestCase):
         money_u, _, _ = build_coordinate_grid(
             config, "moneyness_adaptive_uniform_maturity", "arithmetic"
         )
-        np.testing.assert_allclose(paper.axes[config.n_assets], paper_t.axes[config.n_assets])
+        np.testing.assert_allclose(
+            paper.axes[config.n_assets], paper_t.axes[config.n_assets]
+        )
         np.testing.assert_allclose(paper_t.axes[-1], money_t.axes[-1])
         np.testing.assert_allclose(paper.axes[-1], money_u.axes[-1])
         self.assertFalse(np.allclose(paper.axes[-1], paper_t.axes[-1]))
@@ -190,12 +278,53 @@ class GridTests(unittest.TestCase):
             config.correlation,
             config.dividends,
         )
-        market = np.array([
-            [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 14.0 / 365.0],
-            [50.0, 65.0, 80.0, 95.0, 110.0, 75.0, 0.06, 2.0],
-        ])
+        market = np.array(
+            [
+                [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 14.0 / 365.0],
+                [50.0, 65.0, 80.0, 95.0, 110.0, 75.0, 0.06, 2.0],
+            ]
+        )
         recovered = transform.to_market(transform.to_model(market))
         np.testing.assert_allclose(recovered, market, rtol=2e-14, atol=2e-14)
+
+    def test_bounded_standardized_risk_is_tensor_compatible(self):
+        config = PaperConfig()
+        m_bounds = (
+            np.log(config.strike_bounds[0] / config.spot_bounds[1]),
+            np.log(config.strike_bounds[1] / config.spot_bounds[0]),
+        )
+        transform = BoundedStandardizedRiskTransform(
+            config.n_assets,
+            config.volatilities,
+            config.correlation,
+            config.dividends,
+            moneyness_bounds=m_bounds,
+        )
+        market = np.array(
+            [
+                [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 14.0 / 365.0],
+                [50.0, 65.0, 80.0, 95.0, 110.0, 75.0, 0.06, 2.0],
+            ]
+        )
+        model = transform.to_model(market)
+        self.assertTrue(np.all(np.abs(model[:, config.n_assets]) <= 1.0))
+        np.testing.assert_allclose(
+            transform.to_market(model),
+            market,
+            rtol=2e-14,
+            atol=2e-14,
+        )
+
+        grid, grid_transform, _ = build_greek_coordinate_grid(
+            config,
+            "bounded_standardized_risk",
+        )
+        indices = grid.random_physical_indices(256, np.random.default_rng(9))
+        tensor_market = grid_transform.to_market(grid.indices_to_points(indices))
+        basket = np.exp(np.mean(np.log(tensor_market[:, : config.n_assets]), axis=1))
+        log_moneyness = np.log(tensor_market[:, config.n_assets] / basket)
+        self.assertGreaterEqual(np.min(log_moneyness), m_bounds[0] - 1e-13)
+        self.assertLessEqual(np.max(log_moneyness), m_bounds[1] + 1e-13)
 
     def test_gamma_monitor_axis_is_strict_and_preserves_bounds(self):
         config = PaperConfig()
@@ -229,6 +358,7 @@ class GridTests(unittest.TestCase):
             "price_adaptive",
             "gamma_monitor",
             "standardized_risk",
+            "bounded_standardized_risk",
         ):
             grid, _, description = build_greek_coordinate_grid(config, mode)
             shapes.append(grid.shape)
@@ -261,20 +391,20 @@ class PricingTests(unittest.TestCase):
     def test_put_nonnegative(self):
         config = PaperConfig()
         prices = geometric_basket_put(
-            [[50] * 5, [100] * 5], [80, 80], [0.03, 0.03], [1, 1],
-            config.volatilities, config.correlation,
+            [[50] * 5, [100] * 5],
+            [80, 80],
+            [0.03, 0.03],
+            [1, 1],
+            config.volatilities,
+            config.correlation,
         )
         self.assertTrue(np.all(prices >= 0.0))
 
     def test_arithmetic_qmc_is_reproducible(self):
         config = PaperConfig()
         parameters = np.array([[80.0, 90.0, 100.0, 110.0, 120.0, 100.0, 0.03, 0.5]])
-        first = EuropeanArithmeticBasketQMC(
-            config, n_paths=512, seed=17
-        )(parameters)
-        second = EuropeanArithmeticBasketQMC(
-            config, n_paths=512, seed=17
-        )(parameters)
+        first = EuropeanArithmeticBasketQMC(config, n_paths=512, seed=17)(parameters)
+        second = EuropeanArithmeticBasketQMC(config, n_paths=512, seed=17)(parameters)
         np.testing.assert_array_equal(first, second)
 
     def test_arithmetic_qmc_respects_positive_homogeneity(self):
@@ -299,9 +429,9 @@ class PricingTests(unittest.TestCase):
             physical_shape=(32, 64, 8, 8),
         )
         parameters = np.array([[100.0, 105.0, 0.03, 0.75]])
-        qmc_price = EuropeanArithmeticBasketQMC(
-            config, n_paths=512, seed=23
-        )(parameters)[0]
+        qmc_price = EuropeanArithmeticBasketQMC(config, n_paths=512, seed=23)(
+            parameters
+        )[0]
         exact = geometric_basket_put(
             [[100.0]], [105.0], [0.03], [0.75], np.array([0.2]), np.eye(1)
         )[0]
@@ -356,10 +486,12 @@ class PricingTests(unittest.TestCase):
 
     def test_american_frozen_policy_requires_one_fixed_contract(self):
         config = PaperConfig()
-        scenarios = np.array([
-            [80.0, 90.0, 100.0, 110.0, 120.0, 100.0, 0.03, 30 / 365],
-            [80.0, 90.0, 100.0, 110.0, 120.0, 101.0, 0.03, 30 / 365],
-        ])
+        scenarios = np.array(
+            [
+                [80.0, 90.0, 100.0, 110.0, 120.0, 100.0, 0.03, 30 / 365],
+                [80.0, 90.0, 100.0, 110.0, 120.0, 101.0, 0.03, 30 / 365],
+            ]
+        )
         pricer = AmericanArithmeticBasketLSMC(
             config,
             n_paths=64,
@@ -399,9 +531,9 @@ class PricingTests(unittest.TestCase):
             config.dividends,
         )
         maturity = 0.5
-        expected_peak = float(geometric_basket_convexity_ridge(
-            maturity, basket_sigma, basket_carry
-        ))
+        expected_peak = float(
+            geometric_basket_convexity_ridge(maturity, basket_sigma, basket_carry)
+        )
         m = np.linspace(expected_peak - 0.5, expected_peak + 0.5, 20_001)
         chi = geometric_basket_log_moneyness_convexity(
             m, maturity, rate, basket_sigma, basket_carry
@@ -411,10 +543,12 @@ class PricingTests(unittest.TestCase):
 
     def test_moneyness_coordinate_round_trip(self):
         transform = CoordinateTransform(5, "geometric", True)
-        market = np.array([
-            [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 1.2],
-            [20.0, 30.0, 40.0, 50.0, 60.0, 35.0, 0.01, 0.2],
-        ])
+        market = np.array(
+            [
+                [80.0, 90.0, 100.0, 110.0, 120.0, 105.0, 0.03, 1.2],
+                [20.0, 30.0, 40.0, 50.0, 60.0, 35.0, 0.01, 0.2],
+            ]
+        )
         np.testing.assert_allclose(
             transform.to_market(transform.to_model(market)), market, rtol=1e-14
         )
@@ -431,9 +565,10 @@ class PricingTests(unittest.TestCase):
             config, 3, np.random.default_rng(11)
         )
         self.assertEqual(points.shape, (15, config.n_assets + 3))
-        counts = {name: sum(label[0] == name for label in labels) for name in {
-            label[0] for label in labels
-        }}
+        counts = {
+            name: sum(label[0] == name for label in labels)
+            for name in {label[0] for label in labels}
+        }
         self.assertTrue(all(count == 3 for count in counts.values()))
         for column, (lower, upper) in enumerate(config.bounds):
             self.assertTrue(np.all(points[:, column] >= lower))
@@ -461,6 +596,126 @@ class RiskTests(unittest.TestCase):
 
 
 class GreekTests(unittest.TestCase):
+    def test_curve_error_diagnostics_detects_shape_oscillation(self):
+        moneyness = np.linspace(-1.0, 1.0, 5)
+        reference = moneyness**2
+        estimate = reference + np.array([0.0, -0.2, 0.2, -0.2, 0.0])
+        diagnostics = curve_error_diagnostics(
+            moneyness,
+            reference,
+            estimate,
+        )
+        self.assertEqual(diagnostics["point_count"], 5)
+        self.assertEqual(diagnostics["moneyness_at_maximum_error"], -0.5)
+        self.assertGreater(
+            diagnostics["shape_by_component_column"][0]["estimate_turning_point_count"],
+            diagnostics["shape_by_component_column"][0][
+                "reference_turning_point_count"
+            ],
+        )
+
+    def test_full_hessian_diagnostics_separate_sign_and_psd(self):
+        reference = {
+            "gamma_diagonal": np.array([[2.0, 1.0], [1.5, 0.8]]),
+            "cross_gamma": np.array([[-0.5], [0.3]]),
+        }
+        estimate = {
+            "gamma_diagonal": np.array([[2.01, 0.99], [1.49, 0.81]]),
+            "cross_gamma": np.array([[-0.49], [0.29]]),
+        }
+        fidelity = full_hessian_error_metrics(reference, estimate)
+        signs = cross_gamma_sign_diagnostics(
+            reference["cross_gamma"],
+            estimate["cross_gamma"],
+            labels=["Gamma_12"],
+        )
+        self.assertGreater(fidelity["aggregate_relative_frobenius_error"], 0.0)
+        self.assertEqual(fidelity["material_psd_violation_count"], 0)
+        self.assertEqual(signs["sign_agreement_fraction"], 1.0)
+        self.assertEqual(signs["by_component"][0]["reference_negative_count"], 1)
+
+    def test_columnwise_error_metrics_preserve_labels(self):
+        reference = np.array([[1.0, 2.0], [2.0, 4.0]])
+        estimate = reference + np.array([[0.1, -0.2], [0.1, -0.2]])
+        metrics = columnwise_error_metrics(
+            reference,
+            estimate,
+            labels=["S1", "S2"],
+        )
+        self.assertEqual([record["label"] for record in metrics], ["S1", "S2"])
+        self.assertAlmostEqual(metrics[0]["mae"], 0.1)
+        self.assertAlmostEqual(metrics[1]["mae"], 0.2)
+
+    def test_component_error_decomposition_closes_exactly(self):
+        analytical = {
+            "price": np.array([10.0, 12.0]),
+            "delta": np.array([[-0.4, -0.2], [-0.3, -0.1]]),
+            "gamma_diagonal": np.array([[0.02, 0.03], [0.04, 0.05]]),
+            "cross_gamma": np.array([[0.01], [0.02]]),
+        }
+        exact_fd = {
+            name: np.asarray(values) + 0.1 for name, values in analytical.items()
+        }
+        grid_fd = {
+            name: np.asarray(values) - 0.025 for name, values in exact_fd.items()
+        }
+        decomposition = component_error_decomposition(
+            analytical,
+            exact_fd,
+            grid_fd,
+        )
+        for name in ("price", "delta", "gamma_diagonal", "cross_gamma"):
+            np.testing.assert_allclose(
+                decomposition["total"]["residuals"][name],
+                decomposition["finite_difference"]["residuals"][name]
+                + decomposition["grid_interpolation"]["residuals"][name],
+                atol=1e-15,
+            )
+            np.testing.assert_allclose(
+                decomposition["closure"]["residuals"][name],
+                0.0,
+                atol=1e-15,
+            )
+
+    def test_tt_component_error_decomposition_closes_exactly(self):
+        analytical = {
+            "price": np.array([10.0]),
+            "delta": np.array([[-0.4, -0.2]]),
+            "gamma_diagonal": np.array([[0.02, 0.03]]),
+            "cross_gamma": np.array([[0.01]]),
+        }
+        exact_fd = {
+            name: np.asarray(values) + 0.01 for name, values in analytical.items()
+        }
+        grid_fd = {name: np.asarray(values) - 0.02 for name, values in exact_fd.items()}
+        tt_fd = {name: np.asarray(values) + 0.03 for name, values in grid_fd.items()}
+        decomposition = tt_component_error_decomposition(
+            analytical,
+            exact_fd,
+            grid_fd,
+            tt_fd,
+        )
+        for name in ("price", "delta", "gamma_diagonal", "cross_gamma"):
+            np.testing.assert_allclose(
+                decomposition["closure"]["residuals"][name],
+                0.0,
+                atol=1e-15,
+            )
+
+    def test_residual_layers_share_the_analytical_scale(self):
+        reference = {
+            "price": np.array([2.0]),
+            "delta": np.array([[4.0, -4.0]]),
+            "gamma_diagonal": np.array([[0.5, 1.5]]),
+            "cross_gamma": np.array([[0.25]]),
+        }
+        residual = {
+            name: 0.1 * np.asarray(values) for name, values in reference.items()
+        }
+        metrics = component_residual_metrics(reference, residual)
+        for name in ("price", "delta", "gamma_diagonal", "cross_gamma"):
+            self.assertAlmostEqual(metrics[name]["normalized_mae"], 0.1)
+
     def test_convergence_helpers_preserve_hessian_layout(self):
         first = {
             "price": np.array([1.0]),
@@ -468,10 +723,7 @@ class GreekTests(unittest.TestCase):
             "gamma_diagonal": np.array([[4.0, 5.0]]),
             "cross_gamma": np.array([[6.0]]),
         }
-        second = {
-            name: np.asarray(value) + 2.0
-            for name, value in first.items()
-        }
+        second = {name: np.asarray(value) + 2.0 for name, value in first.items()}
         mean, standard_error = mean_and_standard_error([first, second])
         np.testing.assert_allclose(mean["gamma_diagonal"], [[5.0, 6.0]])
         np.testing.assert_allclose(standard_error["price"], [1.0])
@@ -586,40 +838,29 @@ class GreekTests(unittest.TestCase):
             spot_columns=(0, 1, 2),
             relative_bump=1e-3,
         )
-        analytical_delta, analytical_gamma = (
-            geometric_basket_put_spot_greeks(
-                spots[None, :],
-                [strike],
-                [rate],
-                [maturity],
-                volatilities,
-                correlation,
-            )
+        analytical_delta, analytical_gamma = geometric_basket_put_spot_greeks(
+            spots[None, :],
+            [strike],
+            [rate],
+            [maturity],
+            volatilities,
+            correlation,
         )
 
         covariance = np.outer(volatilities, volatilities) * correlation
         basket_variance = float(weights @ covariance @ weights)
         basket_sigma = np.sqrt(basket_variance)
         basket = float(np.exp(np.log(spots) @ weights))
-        carry = (
-            rate
-            - 0.5 * float(weights @ volatilities**2)
-            + 0.5 * basket_variance
-        )
+        carry = rate - 0.5 * float(weights @ volatilities**2) + 0.5 * basket_variance
         std = basket_sigma * np.sqrt(maturity)
         d1 = (
-            np.log(basket / strike)
-            + (carry + 0.5 * basket_variance) * maturity
+            np.log(basket / strike) + (carry + 0.5 * basket_variance) * maturity
         ) / std
-        normal_cdf_minus_d1 = 0.5 * (
-            1.0 + math.erf(-d1 / np.sqrt(2.0))
-        )
+        normal_cdf_minus_d1 = 0.5 * (1.0 + math.erf(-d1 / np.sqrt(2.0)))
         normal_density_d1 = np.exp(-0.5 * d1**2) / np.sqrt(2.0 * np.pi)
         discount_carry = np.exp((carry - rate) * maturity)
         basket_delta = -discount_carry * normal_cdf_minus_d1
-        basket_gamma = (
-            discount_carry * normal_density_d1 / (basket * std)
-        )
+        basket_gamma = discount_carry * normal_density_d1 / (basket * std)
 
         basket_first = weights * basket / spots
         expected_delta = basket_delta * basket_first
@@ -636,12 +877,9 @@ class GreekTests(unittest.TestCase):
                 rtol=1e-6,
                 atol=1e-9,
             )
-            basket_second = (
-                weights[i] * (weights[i] - 1.0) * basket / spots[i] ** 2
-            )
+            basket_second = weights[i] * (weights[i] - 1.0) * basket / spots[i] ** 2
             expected = (
-                basket_gamma * basket_first[i] ** 2
-                + basket_delta * basket_second
+                basket_gamma * basket_first[i] ** 2 + basket_delta * basket_second
             )
             np.testing.assert_allclose(
                 analytical_gamma[0, i, i],
@@ -658,9 +896,7 @@ class GreekTests(unittest.TestCase):
 
         for i in range(3):
             for j in range(i + 1, 3):
-                basket_mixed = (
-                    weights[i] * weights[j] * basket / (spots[i] * spots[j])
-                )
+                basket_mixed = weights[i] * weights[j] * basket / (spots[i] * spots[j])
                 expected = (
                     basket_gamma * basket_first[i] * basket_first[j]
                     + basket_delta * basket_mixed

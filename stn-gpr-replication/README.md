@@ -1,5 +1,133 @@
 # STN-GPR replication
 
+## Version 9.8: final pricing-grid versus risk-grid comparison
+
+Version 9.8 closes the controlled European geometric-basket Greek programme.
+It compares the paper-I price-adaptive log-moneyness grid with the final bounded
+standardized-risk grid in two complementary experiments:
+
+- an exact-grid, matched-resolution coordinate ablation;
+- a native-architecture raw-TT comparison over common seeds and oracle budgets.
+
+The production comparison derives price, all five spot Deltas and the complete
+`5 x 5` fixed-strike Hessian from one unified scalar cubic surface. It retains
+the v9.7 decision not to apply post-fit price-norm truncation. A dense 30-day
+profile makes `Delta_1`, `Gamma_1,1` and `Gamma_1,2` visually auditable.
+
+European arithmetic and American products are explicitly outside the v9.8
+scope. See `V9_8_RUN_COMMANDS.md` and `CHANGELOG_V9_8.md`.
+
+## Version 9.7: Greek-aware truncation selection
+
+Version 9.7 determines the largest TT truncation that remains admissible for a
+risk engine.  Every tolerance is applied to identical raw 200k TT-cross cores
+and screened over five seeds with both global and local maturity–moneyness
+criteria.  The most compressed robust candidates are then certified with the
+v9.6 unified scalar cubic price surface.
+
+The implementation persists raw TT cores and checkpoints every completed
+variant.  Long paper runs can therefore resume without refitting completed
+seeds.  The first rejected tolerance is retained as a boundary control, so the
+selection demonstrates both acceptance and failure rather than reporting only
+the winning configuration.  See `V9_7_RUN_COMMANDS.md`.
+
+## Version 9.6: one price surface for prices and Greeks
+
+Version 9.6 audits a requirement that aggregate error tables alone cannot
+establish: price, Delta and the complete spot Hessian should be finite-
+difference derivatives of the same interpolated scalar TT price surface.  It
+compares multilinear interpolation, cubic interpolation along the bounded
+risk coordinate, the previous component-dependent hybrid rule and one fixed
+cubic rule on all five spot coordinates plus the bounded risk coordinate.
+
+The exact-grid oracle isolates the interpolation floor before TT-cross is
+introduced.  The raw 200k fit is retained as the accuracy reference and the
+`1e-8` truncation as the compressed candidate.  Acceptance now combines the
+existing global price/Greek/Hessian tests with worst-slice and worst-point
+criteria in the `(m,T)` plane.  See `V9_6_RUN_COMMANDS.md`.
+
+## Version 9.5: Greek-aware multi-seed truncation
+
+Version 9.5 closes the price-norm truncation investigation on the selected
+bounded standardized-risk grid.  For each of five TT-cross seeds, it fits one
+raw 200k surrogate and reapplies the tolerances `0`, `1e-14`, `1e-12`, `1e-10`
+and `1e-8` to exactly the same raw cores.  The output records the complete QTT
+bond-rank path, price and full-Hessian errors, material cross-Gamma signs and
+the fraction of raw parameters retained.
+
+The automatic selection is intentionally conservative: it chooses the most
+compressed tolerance that passes every price, Delta, Gamma, Hessian, PSD and
+material-sign criterion for every requested seed.  Dedicated figures show the
+seed range, compression response, pass/fail matrix and accuracy-compression
+frontier.  See `V9_5_RUN_COMMANDS.md`.
+
+## Version 9.4.1: budget-seed and truncation stability
+
+Version 9.4.1 follows the non-monotone v9.4 Hessian result.  It extends the
+100k, 150k and 200k budgets to the complete five-seed matrix while resuming the
+existing v9.4 JSON, so only eight missing fits are computed.  Every new fit
+records QTT rank and parameter count both before and after price-norm
+truncation.
+
+A separate controlled ablation fits raw TT-cross cores once per `(seed,budget)`
+pair, then reapplies the untruncated control and the `1e-10`, `1e-8` and `1e-6`
+truncations to those identical cores.  Any resulting Greek variation is
+therefore attributable to truncation rather than to a new stochastic fit.  A
+scale-sensitivity audit for near-zero cross-Gamma signs is also stored.  See
+`V9_4_1_RUN_COMMANDS.md`.
+
+## Version 9.4: QTT reconstruction convergence for Greeks
+
+Version 9.4 reintroduces QTT-cross only after the v9.3 five-asset Greek gate.
+It measures the 20k--200k reconstruction-budget curve, retains 150k as the
+candidate operating point, and repeats that point over five independent TT
+seeds.  Every result separates finite-difference, grid-interpolation and TT
+reconstruction errors for price, all five Deltas and the full 5x5 spot
+Hessian.
+
+The first compression smoke test exposed that the original unbounded
+standardized coordinate is local rather than globally tensor-compatible: its
+global coordinate extrema combined with unrelated maturities can generate
+log-moneyness outside the economic domain.  V9.4 therefore uses a bounded
+standardized-risk coordinate whose endpoints map exactly to the original
+log-moneyness bounds for every rate and maturity.  The JSON includes a tensor-
+domain audit, actual oracle evaluations, ranks, fit times, sign diagnostics and
+scale-aware PSD diagnostics.  See `V9_4_RUN_COMMANDS.md`.
+
+## Version 9.3: full five-asset spot Hessian
+
+Version 9.3 freezes the v9.2 selection at 64 spot nodes, 512 standardized-risk
+nodes, 64 maturity nodes and a 0.2% fixed-strike spot bump.  It validates all
+five spot Deltas, five diagonal Gammas and ten cross-Gammas of the European
+geometric-basket put.  The complete 5x5 Hessian is compared with the analytical
+oracle and exact-price finite differences on dense moneyness curves and three
+heterogeneous spot panels.  Componentwise errors, cross-Gamma sign fidelity,
+Frobenius error and scale-aware PSD diagnostics are reported.  See
+`V9_3_RUN_COMMANDS.md`.
+
+## Version 9.2.1: dense Greek profile audit
+
+Version 9.2.1 closes the visual-validation gap left by the sparse v9.2 panel.
+It evaluates continuous fixed-strike Delta, diagonal Gamma and cross-Gamma
+profiles on up to 201 uniformly spaced log-moneyness values per curve.  Exact
+analytical, exact-price finite-difference, multilinear and risk-hybrid cubic
+curves are stored pointwise, together with MAE, tail/max errors, total
+variation, turning-point and Hessian-shape diagnostics.  See
+`V9_2_1_RUN_COMMANDS.md`.
+
+## Version 9.2: Greek error-floor decomposition
+
+Version 9.2 freezes the v9.1 selection (`standardized_risk`, 64 nodes on
+every spot axis) and determines why the remaining second-order Greek error
+does not vanish monotonically under spot refinement.  On spot panels not used
+in v9.1, it ablates the relative bump and interpolation rule and reports the
+machine-checkable identity
+
+`grid FD - analytical = finite-difference error + grid-interpolation error`.
+
+No TT or Monte Carlo approximation is present in this diagnostic gate.  See
+`V9_2_RUN_COMMANDS.md` and `CHANGELOG_V9_2.md`.
+
 ## Version 9.1: standardized-risk spot-resolution ablation
 
 The v9 paper profile selects the maturity-standardized risk coordinate, but its
