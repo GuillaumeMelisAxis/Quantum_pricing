@@ -443,3 +443,25 @@ Two portfolio constructions are tested separately:
 
 The second construction must be rebuilt after position changes, so the operational
 break-even point is part of the result rather than assumed.
+
+## V9.9.2 - Geometric node redistribution
+
+The final coordinate audit compares the pricing and risk-hybrid grids before
+any TT reconstruction is introduced.  Both candidates use the same physical
+mode sizes and the same log-moneyness endpoints.  For every `(r,T)` slice, the
+experiment computes the normalized root-mean-square displacement `D2`, the
+normalized maximum displacement `D_infinity`, and the local fill distance in
+
+`R_kappa = [m_star-kappa sigma_G sqrt(T), m_star+kappa sigma_G sqrt(T)]`.
+
+The two node fractions `P_kappa^(pricing)` and `P_kappa^(risk)` identify the
+concentration mechanism, while
+`G_fill=h_kappa^(pricing)/h_kappa^(risk)` verifies whether this redistribution
+actually reduces the largest local hole.  A value above one indicates improved
+risk-hybrid coverage.
+
+Formally, the implementation records
+`P_kappa^(g)=n^(-1) sum_j 1{m_j^(g) in R_kappa}` as `P_nodes`.  The experiment
+contains no interpolation error, price derivative, curvature proxy or TT-cross
+fit; these quantities are intentionally excluded to preserve a one-to-one
+correspondence with the theoretical section.
