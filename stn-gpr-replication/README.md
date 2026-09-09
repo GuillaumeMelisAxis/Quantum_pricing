@@ -675,3 +675,26 @@ The command writes `figures/sinh-moneyness-discretization.png` and
 3. Compare repriced portfolio VaR and ES, including tail-ranking stability.
 4. Compare delta, gamma and cross-gamma surfaces to trusted finite differences.
 5. Oversample and diagnose the region around the American exercise boundary.
+
+## V9.9.2 physical node-redistribution audit
+
+Version 9.9.2 isolates the geometric effect of the paper-I pricing coordinate
+and the risk-hybrid coordinate at identical node count.  Its output is aligned
+term by term with the mathematical framework: normalized root-mean-square
+displacement `D2`, normalized maximum displacement `D_infinity`, coverage gain
+`G_fill=h_pricing/h_risk`, and the two node concentrations
+`P_kappa^(pricing)` and `P_kappa^(risk)`.
+
+No interpolation error, price derivative, curvature proxy or TT diagnostic is
+reported by this experiment.
+
+Run the fast smoke profile with:
+
+```bat
+python scripts\validation\analyze_grid_node_redistribution_v992.py ^
+  --profile smoke ^
+  --output results\greeks_v992_grid_geometry_smoke.json
+```
+
+The complete commands and interpretation contract are documented in
+`V9_9_2_RUN_COMMANDS.md` and `CHANGELOG_V9_9_2.md`.

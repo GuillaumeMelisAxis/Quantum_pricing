@@ -8,6 +8,12 @@ from .greeks import (
     geometric_basket_put_spot_greeks,
     project_symmetric_matrix_psd,
 )
+from .grid_geometry import (
+    interval_fill_distance,
+    local_coverage_metrics,
+    normalized_node_displacement,
+    physical_log_moneyness_nodes,
+)
 from .portfolio import BasketOptionTrade, Portfolio
 from .pricers import (
     EuropeanArithmeticBasketVolPricer,
@@ -57,6 +63,10 @@ __all__ = [
     "finite_difference_hybrid_greeks",
     "geometric_basket_put",
     "geometric_basket_put_spot_greeks",
+    "interval_fill_distance",
+    "local_coverage_metrics",
+    "normalized_node_displacement",
+    "physical_log_moneyness_nodes",
     "project_symmetric_matrix_psd",
     "sample_market_points",
     "var_es",

@@ -42,6 +42,13 @@ from stngpr.greeks import (
     project_symmetric_matrix_psd,
 )
 from stngpr.grids import QTTGrid, sinh_centered_axis
+from stngpr.grid_geometry import (
+    interval_fill_distance,
+    local_coverage_metrics,
+    local_cubic_lagrange,
+    normalized_node_displacement,
+    physical_log_moneyness_nodes,
+)
 from stngpr.portfolio import Portfolio
 from stngpr.pricers import (
     AmericanArithmeticBasketLSMC,
@@ -1178,6 +1185,80 @@ class GreekTests(unittest.TestCase):
                 np.array([100.0, 90.0]),
                 spot_columns=(0, 0),
             )
+
+
+class GridGeometryTests(unittest.TestCase):
+    def test_interval_fill_distance_is_exact(self):
+        nodes = np.array([0.0, 0.5, 1.0])
+        global_fill = interval_fill_distance(nodes, 0.0, 1.0)
+        self.assertAlmostEqual(global_fill["fill_distance"], 0.25)
+        local_fill = interval_fill_distance(nodes, 0.1, 0.2)
+        self.assertAlmostEqual(local_fill["fill_distance"], 0.2)
+        coverage = local_coverage_metrics(nodes, 0.1, 0.2)
+        self.assertEqual(coverage["node_count"], 0)
+        self.assertAlmostEqual(coverage["node_fraction"], 0.0)
+
+    def test_normalized_node_displacement(self):
+        reference = np.array([0.0, 0.5, 1.0])
+        identical = normalized_node_displacement(reference, reference, (0.0, 1.0))
+        self.assertEqual(identical["normalized_l2"], 0.0)
+        candidate = np.array([0.0, 0.4, 1.0])
+        shifted = normalized_node_displacement(reference, candidate, (0.0, 1.0))
+        self.assertAlmostEqual(shifted["normalized_linf"], 0.1)
+        self.assertAlmostEqual(shifted["normalized_l2"], 0.1 / np.sqrt(3.0))
+
+    def test_local_cubic_reproduces_polynomial_and_derivatives(self):
+        nodes = np.array([-1.0, -0.6, -0.1, 0.2, 0.7, 1.0])
+        polynomial = lambda x: 1.2 - 0.7 * x + 0.4 * x**2 + 0.9 * x**3
+        points = np.linspace(-1.0, 1.0, 41)
+        value, first, second = local_cubic_lagrange(
+            nodes,
+            polynomial(nodes),
+            points,
+        )
+        np.testing.assert_allclose(value, polynomial(points), rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            first,
+            -0.7 + 0.8 * points + 2.7 * points**2,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            second,
+            0.8 + 5.4 * points,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    def test_v99_grids_share_endpoints_but_redistribute_nodes(self):
+        config = replace(
+            PaperConfig(),
+            physical_shape=(8, 8, 8, 8, 8, 64, 8, 8),
+        )
+        physical = {}
+        for name, mode in (
+            ("pricing", "price_adaptive"),
+            ("risk", "bounded_standardized_risk"),
+        ):
+            grid, transform, _ = build_greek_coordinate_grid(config, mode)
+            physical[name] = physical_log_moneyness_nodes(
+                grid,
+                transform,
+                config.n_assets,
+                rate=0.03,
+                maturity=30.0 / 365.0,
+            )
+        np.testing.assert_allclose(
+            physical["pricing"][[0, -1]],
+            physical["risk"][[0, -1]],
+            rtol=0.0,
+            atol=1e-13,
+        )
+        displacement = normalized_node_displacement(
+            physical["pricing"],
+            physical["risk"],
+        )
+        self.assertGreater(displacement["normalized_l2"], 0.0)
 
 
 class VolatilityExtensionTests(unittest.TestCase):
