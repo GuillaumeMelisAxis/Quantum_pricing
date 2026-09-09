@@ -88,8 +88,8 @@ class QTTGrid:
             [rng.integers(0, n, size=n_samples) for n in self.shape]
         )
 
-    def multilinear_stencil(self, points: np.ndarray):
-        """Return corner indices and weights for each off-grid point."""
+    def bracket(self, points: np.ndarray):
+        """Return the bracketing indices and upper weight on every axis."""
         points = np.asarray(points, dtype=float)
         if points.ndim == 1:
             points = points[None, :]
@@ -109,6 +109,15 @@ class QTTGrid:
             lo[:, j] = lower
             hi[:, j] = upper
             w_hi[:, j] = (values - axis[lower]) / denominator
+        return lo, hi, w_hi
+
+    def multilinear_stencil(self, points: np.ndarray):
+        """Return corner indices and weights for each off-grid point."""
+        points = np.asarray(points, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        m, d = points.shape
+        lo, hi, w_hi = self.bracket(points)
 
         corners = np.empty((m, 2**d, d), dtype=np.int64)
         weights = np.empty((m, 2**d), dtype=float)
@@ -118,8 +127,14 @@ class QTTGrid:
             weights[:, c] = np.prod(np.where(selector, w_hi, 1.0 - w_hi), axis=1)
         return corners, weights
 
-    def hybrid_cubic_stencil(self, points: np.ndarray, cubic_columns=()):
-        """Tensor-product stencil, cubic on selected axes and linear elsewhere."""
+    def axis_stencils(self, points: np.ndarray, cubic_columns=()):
+        """Per-axis support indices and interpolation weights.
+
+        Returns one ``(m, k_j)`` index array and one ``(m, k_j)`` weight array
+        per axis, with ``k_j`` equal to two on linear axes and four on cubic
+        ones. Keeping the axes separate is what lets a tensor train contract
+        them one at a time instead of enumerating the product stencil.
+        """
         points = np.asarray(points, dtype=float)
         if points.ndim == 1:
             points = points[None, :]
@@ -164,6 +179,15 @@ class QTTGrid:
 
             support_indices.append(indices.astype(np.int64))
             support_weights.append(weights)
+        return support_indices, support_weights
+
+    def hybrid_cubic_stencil(self, points: np.ndarray, cubic_columns=()):
+        """Tensor-product stencil, cubic on selected axes and linear elsewhere."""
+        points = np.asarray(points, dtype=float)
+        if points.ndim == 1:
+            points = points[None, :]
+        m, d = points.shape
+        support_indices, support_weights = self.axis_stencils(points, cubic_columns)
 
         sizes = [indices.shape[1] for indices in support_indices]
         n_corners = int(np.prod(sizes))

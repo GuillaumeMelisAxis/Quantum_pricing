@@ -262,6 +262,306 @@ separated from irreducible off-grid interpolation error.
   four seeds out of five at 9,000 and 12,000 evaluations, has positive mean
   paired improvement, and its worst-seed MAE is no more than twice its median.
 
+## Stage 1b - Volatility as a sampled dimension
+
+An extension beyond the paper. Each underlying gets its own volatility
+coordinate, so the European geometric basket is learned over 13 physical inputs
+instead of 8.
+
+- Inputs: `(S1, sigma1, S2, sigma2, S3, sigma3, S4, sigma4, S5, sigma5, K, r, T)`.
+- Interleaved on purpose: a tensor train only compresses along the mode order it
+  is given, and the strongest local coupling is between an asset and its own
+  volatility.
+- `sigma_i in [0.05, 0.80]`, gridded uniformly in `u_i = log(sigma_i)`.
+- Grid: `(32 x 16)^5 x 64 x 8 x 8`; QTT shape `[2] * 57` (up from 37 cores).
+- Correlation, dividends and every other bound are inherited from `PaperConfig`.
+- Test points are drawn log-uniformly in sigma by default, matching the grid
+  coordinate; `--vol-sampling uniform` draws them uniformly in sigma instead.
+- Reported per model: effective rank, price MAE and seconds per query, in the
+  JSON `headline` block, plus a `by_basket_volatility` error breakdown keyed on
+  `sigma_B = sqrt(w' (sigma sigma' o C) w)`.
+
+This script's profiles are sized for the 13-dimensional domain, not shared
+with the 8-dimensional runs: `intermediate` uses TT budgets 20,000-200,000 with
+GPR up to 5,000, and `paper` runs 50,000-1,000,000 with GPR up to 10,000.
+`smoke` stays tiny on purpose - it is a wiring check, not a result.
+
+```bash
+python scripts/reproduce_european_vol.py --profile intermediate
+python scripts/reproduce_european_vol.py --profile intermediate --grid-mode paper
+python scripts/reproduce_european_vol.py --profile paper --skip-gpr
+```
+
+### Smoke profile, 500 test points, direct strike axis
+
+| model | effective rank | price MAE | normalized MAE | s/query |
+| --- | --- | --- | --- | --- |
+| oracle interpolation floor | - | 0.116 | 0.0024 | 9.9e-3 |
+| TT, 2,489 evaluations | 5.03 | 7.351 | 0.152 | 6.8e-6 |
+| TT, 5,463 evaluations | 6.85 | 3.427 | 0.071 | 1.0e-5 |
+| GPR, n = 200 | - | 6.403 | 0.132 | 1.7e-5 |
+| GPR, n = 500 | - | 4.670 | 0.096 | 4.2e-5 |
+
+The smoke budgets are far too small at 13 dimensions: TT-cross exhausts the
+budget (`stop: m`) after one or two sweeps, and 5,000 evaluations spread over 57
+cores leave the surrogate two orders of magnitude above its own interpolation
+floor. For reference, the same smoke budgets at 8 dimensions reach MAE 0.094
+against a floor of 0.079. Continuing the budget on the same grid does converge:
+
+| evaluations | effective rank | price MAE | normalized MAE | s/query |
+| --- | --- | --- | --- | --- |
+| 10,444 | 9.23 | 2.620 | 0.054 | 1.2e-5 |
+| 20,485 | 12.12 | 1.715 | 0.035 | 1.6e-5 |
+| 50,479 | 17.38 | 1.297 | 0.027 | 7.7e-5 |
+| 100,476 | 22.57 | 0.862 | 0.018 | 1.6e-4 |
+| 200,088 | 28.77 | 0.669 | 0.014 | 2.1e-4 |
+| 499,755 | 39.40 | 0.397 | 0.0082 | 3.5e-4 |
+
+### Fix: fit P / basket_spot on moneyness grids
+
+The moneyness plateau documented below is repaired by changing the fit target,
+not the grid. `--target price_over_basket` (the automatic choice on moneyness
+grids) makes TT-cross, the oracle and the GPR baseline learn `P / G(S)` and
+multiplies predictions back by the exact basket spot of the query point. In
+moneyness coordinates the geometric closed form divided by `G` contains no spot
+dependence at all, so the five spot modes collapse to rank one and the huge
+out-of-box corners lose their `G` amplification. Validation on
+`moneyness_adaptive` (smoke test set, `--budgets 5000 20000 50000 --skip-gpr`,
+stored in `results/european_vol_scaled_target_check_moneyness_adaptive.json`):
+
+| evaluations | effective rank | price MAE | raw-price target at same grid |
+| --- | --- | --- | --- |
+| oracle floor | - | 0.114 | 0.103 |
+| 5,445 | 6.65 | 1.609 | 8.674 |
+| 20,323 | 9.88 | 0.182 | 7.320 |
+| 50,263 | 15.44 | 0.130 | 7.181 |
+
+At 50,000 evaluations the scaled target sits on the interpolation floor and is
+three times better than the direct strike grid reaches at 500,000. The scaled
+oracle floor differs slightly from the raw one because interpolating `P / G`
+and multiplying by the exact `G` is itself a better interpolant.
+
+### The moneyness coordinate stops paying once volatility is a dimension (raw price target)
+
+`log(K / basket_spot)` is the better coordinate at 8 dimensions but is actively
+harmful at 13:
+
+| grid mode | evaluations | effective rank | price MAE | bias |
+| --- | --- | --- | --- | --- |
+| `paper` | 50,479 | 17.38 | 1.297 | +1.070 |
+| `moneyness_uniform` | 50,294 | 16.97 | 15.691 | +15.690 |
+| `moneyness_adaptive` | 50,446 | 16.67 | 7.181 | +7.171 |
+
+The moneyness runs plateau: their MAE is flat from 20,000 to 500,000
+evaluations while the rank climbs from 11.6 to 32.7. The cause is the grid box,
+not the cross. On the moneyness grid a corner is `K = G(S) exp(m)` with
+`m <= log(K_max / S_min) = 3.69`, so grid strikes reach roughly 6,000 and grid
+prices reach several thousand, far outside the market box. At 8 dimensions the
+deep-ITM price is the rank-one product `G(S) f(m, r, T)` and that unused region
+costs nothing. Adding volatility replaces `f` with a factor containing
+`exp(T sigma_B^2 / 2)`, whose full pairwise coupling across the five volatility
+modes is not low rank, so the cross spends its rank on the unused region. The
+error is almost pure positive bias and concentrates deep ITM.
+
+### The log-volatility axis costs a little accuracy at the interpolation floor
+
+Measured with `--oracle-only`, so this isolates the grid from TT-cross error:
+
+| axis | 8 nodes | 16 nodes | 32 nodes |
+| --- | --- | --- | --- |
+| `u = log(sigma)` | 0.234 | 0.116 | 0.091 |
+| `sigma` | 0.136 | 0.095 | 0.086 |
+
+A uniform sigma axis interpolates slightly better at every resolution, and the
+ordering survives a uniform-sigma test law (0.137 log against 0.089 linear at 16
+nodes). The put price is close to linear in sigma over most of `[0.05, 0.80]`,
+so the log axis buys resolution where it is not needed and gives it up near
+`sigma = 0.80`, where the node spacing widens to 0.148 against 0.05 uniform. The
+gap is small in absolute terms - both floors are under 0.25% of the mean
+absolute price, and an order of magnitude below the TT-cross error at any budget
+tested - so it does not drive the headline numbers, but the log transform should
+be understood as a domain-shape choice rather than an accuracy win.
+
+### Prediction cost
+
+Off-grid multilinear interpolation over `2^d` corners is 8,192 tensor lookups
+per query at `d = 13`, which costs 46-71 ms per query and would dominate any
+timing comparison against the 8-dimensional runs. Because the interpolation
+weight is a product over physical dimensions and the TT value is a product of
+core slices, the corner sum factorizes: each dimension's two candidate index
+chains can be blended in place. `TTPriceSurrogate.predict_factorized` does this
+in 57 small matrix products, agrees with the corner stencil to machine
+precision, and is what the reported seconds per query measure. The scripts still
+time the stencil on a subset and record the agreement in `stencil_inference`.
+
+## Stage 1c - Basket type, mode ordering and a Monte-Carlo reference
+
+Two questions the volatility extension raised, settled empirically. Both run in
+about nine minutes together.
+
+```bash
+python scripts/validation/compare_basket_layouts.py --budgets 50000 100000
+python scripts/validation/compare_monte_carlo.py
+```
+
+### Which mode ordering compresses better depends on the basket
+
+A coupling costs rank on every bond it has to cross, so the better ordering is
+the one that keeps the dominant coupling contiguous. Which coupling dominates is
+a property of the payoff, not of the framework.
+
+At 100,000 evaluations, truncation `1e-4`, 2,000 test points:
+
+| basket | layout | eff. rank | storage | MAE | floor |
+| --- | --- | --- | --- | --- | --- |
+| arithmetic | **interleaved** | 12.61 | **137.0 KiB** | **0.1924** | 0.0920 |
+| arithmetic | blocked | 14.35 | 177.4 KiB | 0.3305 | 0.0920 |
+| geometric | interleaved | 6.40 | 35.4 KiB | 0.1047 | 0.1047 |
+| geometric | **blocked** | 5.59 | **27.0 KiB** | 0.1080 | 0.1047 |
+
+The two baskets disagree, and the mechanism explains why. Under the
+`P / B(s)` target the geometric price is exactly spot-free, so its spot modes
+carry nothing: blocking lets them sit at rank 1 (measured: exactly 1 at every
+truncation), while interleaving forces those 25 QTT cores to relay the
+volatility aggregate at rank 6 to 24. The arithmetic price keeps a genuine
+dependence on basket composition and couples `S_i` to `sigma_i` through
+`exp(sigma_i sigma_j C_ij T)`. That is a local pairwise coupling, which is
+exactly what interleaving is for: it wins on both accuracy (1.7x at 100,000
+evaluations, 2.8x at 50,000) and storage. Its spot-block rank stays at 16 to 21
+under either ordering, confirming the composition dependence is real rather than
+an artifact.
+
+The arithmetic surface is also genuinely harder: it is still a factor of two
+above its interpolation floor at 100,000 evaluations, where the geometric
+surface has already reached its own.
+
+Arithmetic labels use the Levy lognormal moment match, which is what makes
+100,000 TT-cross calls affordable. It carries the correct coupling structure but
+is an approximation: measured against 100,000-path Monte Carlo it is 0.08% at
+total volatility below 0.10, 1.9% in [0.20, 0.35) and 5.0% in [0.35, 0.60), 1.6%
+overall. Reported errors are surrogate-versus-Levy, not surrogate-versus-truth.
+
+### Truncation, not budget, sets the storage
+
+The default `1e-8` truncation is far tighter than the interpolation floor and
+inflates storage several-fold at unchanged accuracy. Geometric, blocked,
+100,000 evaluations:
+
+| truncation | eff. rank | storage | MAE |
+| --- | --- | --- | --- |
+| 1e-8 | 15.62 | 210.2 KiB | 0.1065 |
+| 1e-6 | 13.74 | 162.6 KiB | 0.1065 |
+| 1e-5 | 10.11 | 88.2 KiB | 0.1065 |
+| **1e-4** | **5.59** | **27.0 KiB** | **0.1080** |
+| 1e-3 | 3.26 | 9.2 KiB | 0.1507 |
+
+Nearly 8x the storage for a 1.4% MAE change. Set the truncation so the TT error
+lands just under the interpolation floor.
+
+### Monte-Carlo reference on the geometric basket
+
+Both methods scored against the closed form, 2,000 test points, mean absolute
+price 44.67. Monte Carlo simulates all five correlated assets to maturity in one
+step, which is what a general engine pays for a European basket.
+
+| method | MAE | RMSE | bias | s/query | speed vs MC-100k |
+| --- | --- | --- | --- | --- | --- |
+| QTT surrogate | 0.1065 | 0.1531 | +0.1053 | 4.27e-05 | 343x |
+| (interpolation floor) | 0.1035 | 0.1509 | +0.1033 | - | - |
+| Monte Carlo, 10,000 paths | 0.0683 | 0.1126 | -0.0019 | 1.05e-03 | 13.9x |
+| Monte Carlo, 100,000 paths | 0.0220 | 0.0366 | +0.0014 | 1.46e-02 | 1.0x |
+
+Read carefully, this is not a clean surrogate win. Monte Carlo at 10,000 paths
+is already *more accurate* than the surrogate, because the surrogate is pinned
+at its interpolation floor while Monte Carlo error keeps falling as
+`1/sqrt(N)`. The surrogate's advantage is speed at a fixed accuracy target and
+determinism, not accuracy:
+
+- at matched accuracy, reaching the surrogate's RMSE needs about 5,400 paths,
+  costing 5.7e-04 s/query, still **13x slower** than the surrogate;
+- the 8.6 s build amortizes after 8,512 queries against 10,000-path Monte Carlo,
+  or 589 queries against 100,000-path Monte Carlo;
+- the surrogate returns the *same* price every call. Monte Carlo error is fresh
+  noise on every revaluation (repeat-to-repeat standard deviation 0.041 at
+  10,000 paths), which is what damages finite-difference Greeks and paired
+  scenario comparisons.
+
+### The floor is convexity bias, and it is reducible
+
+The surrogate's error is almost entirely bias (+0.1053 out of 0.1065 MAE), and
+so is the floor's (+0.1033 out of 0.1035). Multilinear interpolation of a convex
+price surface always overestimates, so this is a systematic discretization
+effect rather than noise. Replacing linear with cubic interpolation on the
+high-curvature axes shrinks it substantially (oracle floor, 500 test points):
+
+| interpolation | floor MAE | bias |
+| --- | --- | --- |
+| multilinear | 0.1145 | +0.1143 |
+| cubic on `m` | 0.0408 | +0.0402 |
+| cubic on `m` and `T` | 0.0364 | +0.0361 |
+
+### Factorized cubic interpolation
+
+`predict_factorized` now takes `cubic_columns`. The interpolation weight is a
+product over modes whether an axis is linear or cubic, so the factorization is
+unchanged: a cubic axis blends four candidate index chains instead of two. Cost
+goes from `prod_j k_j` corner lookups to `sum_j k_j q_j` small matrix products,
+so making every axis cubic at most doubles the query, against a factor of two
+per cubic axis for the corner stencil. Measured against
+`predict_hybrid_cubic` the two agree to `1.1e-15` relative, and the factorized
+path is **16,629x faster** (2.85e-05 against 4.74e-01 seconds per query with a
+cubic moneyness axis).
+
+Which axes to make cubic, on the same fitted train (2,000 test points, blocked
+layout, 100,000 evaluations, truncation `1e-6`, rank 13.74):
+
+| cubic axes | MAE | bias | s/query |
+| --- | --- | --- | --- |
+| none (multilinear) | 0.1065 | +0.1053 | 4.56e-05 |
+| `m` | 0.0417 | +0.0396 | 5.98e-05 |
+| `m`, `T` | 0.0394 | +0.0375 | 5.83e-05 |
+| `m`, `T`, `r` | 0.0365 | +0.0345 | 5.99e-05 |
+| `m`, `T`, vols | 0.0102 | +0.0047 | 8.13e-05 |
+| **all 13** | **0.0091** | **+0.0017** | 8.56e-05 |
+
+The volatility axes matter more than the moneyness axis once the latter is
+fixed: sixteen nodes spanning a factor of sixteen in sigma is a coarse grid, and
+the price is curved in sigma. Making every axis cubic is the default
+(`--cubic-axes all`); it cuts MAE by 11.7x and bias by 62x for twice the query
+cost, and the tails improve as much as the mean:
+
+| | MAE | bias | p95 | max |
+| --- | --- | --- | --- | --- |
+| multilinear | 0.1065 | +0.1053 | 0.3205 | 0.8988 |
+| cubic, all axes | 0.0091 | +0.0017 | 0.0299 | 0.1190 |
+
+Nothing about the representation changes: identical cores, identical rank and
+identical 163 KiB of storage. Cubic is a read-time choice, and the query stays
+`O(sum_j k_j q_j)` - linear in the number of modes, never exponential.
+
+### Monte Carlo revisited with cubic interpolation
+
+The comparison reverses. Same test set and same fitted train as above:
+
+| method | MAE | p95 | max | s/query | speed |
+| --- | --- | --- | --- | --- | --- |
+| **QTT surrogate, cubic** | **0.0091** | **0.0299** | **0.1190** | 8.65e-05 | **167x** |
+| same TT, multilinear | 0.1065 | 0.3205 | 0.8988 | 4.26e-05 | 338x |
+| Monte Carlo, 10,000 paths | 0.0683 | 0.2499 | 0.7654 | 9.95e-04 | 14.5x |
+| Monte Carlo, 100,000 paths | 0.0220 | 0.0830 | 0.2746 | 1.44e-02 | 1.0x |
+
+The surrogate is now **2.4x more accurate than 100,000-path Monte Carlo and 167x
+faster**, on the mean and on both tail measures. At matched accuracy Monte Carlo
+would need about 671,000 paths, costing 9.7e-02 seconds per query, roughly
+**1,100x** the surrogate. The 8.2 s build amortizes after 571 queries against
+100,000-path Monte Carlo.
+
+One caveat: both interpolants return small negative prices on deep
+out-of-the-money points whose true value is under 0.064 (worst case -0.072
+cubic, -0.029 linear, on 7% of points). A `maximum(price, 0)` clip is exact for
+a put and can only reduce the error; it is deliberately not applied inside the
+surrogate, which reports the raw interpolant.
+
 ## Stage 2 - Greeks
 
 The trusted and surrogate pricers are bumped with identical central-difference
@@ -443,3 +743,33 @@ Two portfolio constructions are tested separately:
 
 The second construction must be rebuilt after position changes, so the operational
 break-even point is part of the result rather than assumed.
+
+The per-trade construction is implemented:
+
+```bash
+python scripts/validation/validate_portfolio_var.py --profile smoke --grid-mode paper
+python scripts/validation/validate_portfolio_var.py \
+    --profile intermediate --grid-mode moneyness_adaptive
+```
+
+Scenarios are drawn once, in a single exact GBM step to the risk horizon, and
+reused by the closed-form pricer, the grid interpolation oracle and the TT
+surrogate, so every comparison is paired. The engine ages each trade by the
+horizon at fixed contractual strike and refuses positions expiring inside it;
+`Portfolio.split_at_horizon` excludes them explicitly and the excluded set is
+recorded in the JSON, since it changes with the horizon and changes the book.
+
+The horizon defaults to one day. This is the demanding case rather than the mild
+one: the P&L shrinks with the horizon while the pricing error does not, so the
+surrogate error is measured against a smaller signal and a tighter Monte-Carlo
+interval. The paper maturity axis is the visible cause, its first cell spanning
+`[1/365, 0.43]`; short-dated positions are interpolated linearly across five
+months, so their error does not cancel between the base state and the aged one.
+
+The JSON reports, per confidence level, the VaR order-statistic interval and the
+ES standard error alongside the surrogate error, so a surrogate discrepancy can
+be read against the Monte-Carlo noise it must beat. `--skip-tt` isolates the
+interpolation floor of the selected grid in risk space, which is the Stage-1
+`oracle_interpolation` measurement transported into a risk metric. The scenario
+domain coverage records how often a scenario state leaves the grid box, since an
+interpolant clamps silently and the tail is where that happens.

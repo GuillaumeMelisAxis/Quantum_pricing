@@ -14,21 +14,32 @@ def geometric_basket_put(
     correlation: np.ndarray,
     dividends: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Closed-form put on an equally weighted geometric basket under GBM."""
+    """Closed-form put on an equally weighted geometric basket under GBM.
+
+    ``volatilities`` is either one vector shared by every row, or a
+    ``(m, n_assets)`` array giving each row its own volatility vector. The
+    latter is what the volatility-extended experiment needs, since sigma is
+    then a sampled coordinate rather than a fixed model assumption.
+    """
     spots = np.atleast_2d(np.asarray(spots, dtype=float))
     m, n_assets = spots.shape
     strikes = np.broadcast_to(np.asarray(strikes, dtype=float), (m,))
     rates = np.broadcast_to(np.asarray(rates, dtype=float), (m,))
     maturities = np.broadcast_to(np.asarray(maturities, dtype=float), (m,))
-    sigma = np.asarray(volatilities, dtype=float)
+    sigma = np.atleast_2d(np.asarray(volatilities, dtype=float))
+    if sigma.shape[1] != n_assets or sigma.shape[0] not in (1, m):
+        raise ValueError("volatilities must be one vector or one vector per row")
     q = np.zeros(n_assets) if dividends is None else np.asarray(dividends, dtype=float)
     weights = np.full(n_assets, 1.0 / n_assets)
 
-    covariance = np.outer(sigma, sigma) * np.asarray(correlation, dtype=float)
-    basket_variance = float(weights @ covariance @ weights)
+    # w_i sigma_i C_ij w_j sigma_j, kept factored so no (m, n, n) array is built.
+    scaled = sigma * weights
+    basket_variance = np.sum(
+        (scaled @ np.asarray(correlation, dtype=float)) * scaled, axis=1
+    )
     basket_sigma = np.sqrt(basket_variance)
     g0 = np.exp(np.log(spots) @ weights)
-    carry = rates - weights @ q - 0.5 * weights @ sigma**2 + 0.5 * basket_variance
+    carry = rates - weights @ q - 0.5 * (sigma**2 @ weights) + 0.5 * basket_variance
 
     sqrt_t = np.sqrt(np.maximum(maturities, 1e-16))
     std = basket_sigma * sqrt_t
@@ -335,3 +346,155 @@ class AmericanArithmeticBasketLSMC:
         immediate = max(strike - float(np.mean(s0)), 0.0)
         value = max(immediate, float(np.mean(discounted)))
         return value, fitted_policy
+
+
+class EuropeanGeometricBasketVolPricer:
+    """Closed-form pricer over interleaved (S_1, sigma_1, ..., K, r, T) inputs.
+
+    Each underlying carries its own volatility coordinate, so the price is no
+    longer conditioned on a fixed volatility vector taken from the config.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.spot_columns = list(config.spot_columns)
+        self.volatility_columns = list(config.volatility_columns)
+
+    def __call__(self, parameters: np.ndarray) -> np.ndarray:
+        x = np.atleast_2d(np.asarray(parameters, dtype=float))
+        if x.shape[1] != self.config.n_dimensions:
+            raise ValueError("wrong parameter dimension for the extended pricer")
+        return geometric_basket_put(
+            x[:, self.spot_columns],
+            x[:, self.config.strike_column],
+            x[:, self.config.rate_column],
+            x[:, self.config.maturity_column],
+            x[:, self.volatility_columns],
+            self.config.correlation,
+            self.config.dividends,
+        )
+
+
+def arithmetic_basket_put_levy(
+    spots: np.ndarray,
+    strikes: np.ndarray,
+    rates: np.ndarray,
+    maturities: np.ndarray,
+    volatilities: np.ndarray,
+    correlation: np.ndarray,
+    dividends: np.ndarray | None = None,
+) -> np.ndarray:
+    """Levy (1992) lognormal moment-matched put on an arithmetic basket.
+
+    The arithmetic basket has no closed form. Matching the first two moments of
+    the terminal basket to a lognormal gives a Black-76 formula that is exact in
+    its homogeneity and carries the true ``S_i sigma_i`` cross terms through
+    ``exp(sigma_i sigma_j C_ij T)``. That coupling structure, not the last digit
+    of the price, is what the tensor-rank experiments measure.
+    """
+    spots = np.atleast_2d(np.asarray(spots, dtype=float))
+    m, n_assets = spots.shape
+    strikes = np.broadcast_to(np.asarray(strikes, dtype=float), (m,))
+    rates = np.broadcast_to(np.asarray(rates, dtype=float), (m,))
+    maturities = np.broadcast_to(np.asarray(maturities, dtype=float), (m,))
+    sigma = np.atleast_2d(np.asarray(volatilities, dtype=float))
+    if sigma.shape[1] != n_assets or sigma.shape[0] not in (1, m):
+        raise ValueError("volatilities must be one vector or one vector per row")
+    q = np.zeros(n_assets) if dividends is None else np.asarray(dividends, dtype=float)
+    weights = np.full(n_assets, 1.0 / n_assets)
+    corr = np.asarray(correlation, dtype=float)
+
+    t = maturities[:, None]
+    forwards = weights * spots * np.exp((rates[:, None] - q) * t)   # (m, n)
+    forward = forwards.sum(axis=1)
+    # second moment of the terminal basket, sum_ij F_i F_j exp(sigma_i sigma_j C_ij T)
+    covariance = sigma[:, :, None] * sigma[:, None, :] * corr
+    second_moment = np.einsum(
+        "mi,mj,mij->m",
+        forwards,
+        forwards,
+        np.exp(covariance * maturities[:, None, None]),
+    )
+    variance = np.log(np.maximum(second_moment / forward**2, 1.0 + 1e-14))
+    std = np.sqrt(variance)
+    d1 = (np.log(forward / strikes) + 0.5 * variance) / std
+    d2 = d1 - std
+    discount = np.exp(-rates * maturities)
+    return discount * (strikes * ndtr(-d2) - forward * ndtr(-d1))
+
+
+class EuropeanArithmeticBasketVolPricer:
+    """Levy arithmetic-basket pricer over interleaved or blocked coordinates."""
+
+    def __init__(self, config):
+        self.config = config
+        self.spot_columns = list(config.spot_columns)
+        self.volatility_columns = list(config.volatility_columns)
+
+    def __call__(self, parameters: np.ndarray) -> np.ndarray:
+        x = np.atleast_2d(np.asarray(parameters, dtype=float))
+        if x.shape[1] != self.config.n_dimensions:
+            raise ValueError("wrong parameter dimension for the extended pricer")
+        return arithmetic_basket_put_levy(
+            x[:, self.spot_columns],
+            x[:, self.config.strike_column],
+            x[:, self.config.rate_column],
+            x[:, self.config.maturity_column],
+            x[:, self.volatility_columns],
+            self.config.correlation,
+            self.config.dividends,
+        )
+
+
+def basket_put_monte_carlo(
+    spots: np.ndarray,
+    strikes: np.ndarray,
+    rates: np.ndarray,
+    maturities: np.ndarray,
+    volatilities: np.ndarray,
+    correlation: np.ndarray,
+    n_paths: int,
+    basket_kind: str = "geometric",
+    dividends: np.ndarray | None = None,
+    seed: int | None = None,
+    rng: np.random.Generator | None = None,
+):
+    """Terminal-value Monte Carlo for a European basket put, one row at a time.
+
+    A European basket needs only the terminal joint distribution, so this is a
+    single-step simulation of the five correlated assets. The geometric case
+    also admits a one-dimensional reduction, but a general engine pays for all
+    the assets, which is the cost this benchmark is meant to measure.
+
+    Returns the price estimate and its Monte Carlo standard error.
+    """
+    spots = np.atleast_2d(np.asarray(spots, dtype=float))
+    m, n_assets = spots.shape
+    strikes = np.broadcast_to(np.asarray(strikes, dtype=float), (m,))
+    rates = np.broadcast_to(np.asarray(rates, dtype=float), (m,))
+    maturities = np.broadcast_to(np.asarray(maturities, dtype=float), (m,))
+    sigma = np.atleast_2d(np.asarray(volatilities, dtype=float))
+    if sigma.shape[0] == 1:
+        sigma = np.broadcast_to(sigma, (m, n_assets))
+    q = np.zeros(n_assets) if dividends is None else np.asarray(dividends, dtype=float)
+    weights = np.full(n_assets, 1.0 / n_assets)
+    chol = np.linalg.cholesky(np.asarray(correlation, dtype=float))
+    generator = np.random.default_rng(seed) if rng is None else rng
+
+    prices = np.empty(m, dtype=float)
+    errors = np.empty(m, dtype=float)
+    for i in range(m):
+        t = maturities[i]
+        z = generator.standard_normal((int(n_paths), n_assets)) @ chol.T
+        drift = (rates[i] - q - 0.5 * sigma[i] ** 2) * t
+        terminal = spots[i] * np.exp(drift + sigma[i] * np.sqrt(t) * z)
+        if basket_kind == "geometric":
+            basket = np.exp(np.log(terminal) @ weights)
+        elif basket_kind == "arithmetic":
+            basket = terminal @ weights
+        else:
+            raise ValueError("basket_kind must be 'geometric' or 'arithmetic'")
+        payoff = np.maximum(strikes[i] - basket, 0.0) * np.exp(-rates[i] * t)
+        prices[i] = payoff.mean()
+        errors[i] = payoff.std(ddof=1) / np.sqrt(int(n_paths))
+    return prices, errors

@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 from stngpr.baselines import ManhattanLaplacian
-from stngpr.config import PaperConfig
+from stngpr.config import PaperConfig, VolatilityExtendedConfig
 from stngpr.convergence import (
     columnwise_error_metrics,
     component_error_decomposition,
@@ -42,18 +42,31 @@ from stngpr.greeks import (
     project_symmetric_matrix_psd,
 )
 from stngpr.grids import QTTGrid, sinh_centered_axis
+from stngpr.portfolio import Portfolio
 from stngpr.pricers import (
     AmericanArithmeticBasketLSMC,
     EuropeanArithmeticBasketQMC,
+    EuropeanArithmeticBasketVolPricer,
+    EuropeanGeometricBasketPricer,
+    EuropeanGeometricBasketVolPricer,
+    arithmetic_basket_put_levy,
+    basket_put_monte_carlo,
     geometric_basket_put,
 )
-from stngpr.risk import var_es
+from stngpr.risk import (
+    MonteCarloVaREngine,
+    compare_loss_distributions,
+    domain_coverage,
+    var_es,
+    var_es_uncertainty,
+)
 from stngpr.risk_grids import (
     BoundedStandardizedRiskTransform,
     StandardizedRiskTransform,
     build_greek_coordinate_grid,
     gamma_monitor_axis,
 )
+from stngpr.scenarios import GBMScenarioGenerator
 from stngpr.tt_surrogate import TTPriceSurrogate
 from stngpr.validation import (
     american_put_binomial,
@@ -61,6 +74,12 @@ from stngpr.validation import (
     error_metrics,
     scalar_summary,
     stratified_american_points,
+)
+from stngpr.vol_extension import (
+    BasketScaledModelPricer,
+    build_vol_extended_grid,
+    resolve_cubic_columns,
+    sample_market_points,
 )
 
 
@@ -594,6 +613,236 @@ class RiskTests(unittest.TestCase):
         self.assertEqual(var, 95.0)
         self.assertGreaterEqual(es, var)
 
+    def test_var_es_uncertainty_brackets_the_point_estimate(self):
+        rng = np.random.default_rng(3)
+        losses = rng.standard_normal(20_000)
+        summary = var_es_uncertainty(losses, 0.99)
+        self.assertLessEqual(summary["var_ci"][0], summary["var"])
+        self.assertLessEqual(summary["var"], summary["var_ci"][1])
+        self.assertAlmostEqual(summary["var"], 2.3263, delta=0.06)
+        self.assertEqual(summary["tail_scenarios"], 200)
+
+    def test_portfolio_parameters_age_maturities_and_keep_strikes_fixed(self):
+        portfolio = Portfolio.from_arrays(
+            strikes=[90.0, 110.0], maturities=[1.0, 2.0], quantities=[1.0, -2.0]
+        )
+        spots = np.array([[100.0, 105.0], [80.0, 95.0]])
+        parameters = portfolio.market_parameters(spots, 0.02, maturity_shift=0.25)
+        self.assertEqual(parameters.shape, (2, 2, 5))
+        np.testing.assert_allclose(
+            parameters[:, :, :2], np.broadcast_to(spots[:, None, :], (2, 2, 2))
+        )
+        np.testing.assert_allclose(parameters[:, :, 2], [[90.0, 110.0]] * 2)
+        np.testing.assert_allclose(parameters[:, :, 3], 0.02)
+        np.testing.assert_allclose(parameters[:, :, 4], [[0.75, 1.75]] * 2)
+
+    def test_portfolio_rejects_trades_expiring_inside_the_horizon(self):
+        portfolio = Portfolio.from_arrays(strikes=[100.0], maturities=[0.05])
+        with self.assertRaises(ValueError):
+            portfolio.market_parameters(np.array([[100.0]]), 0.01, maturity_shift=0.05)
+
+    def test_split_at_horizon_separates_expiring_positions(self):
+        portfolio = Portfolio.from_arrays(
+            strikes=[90.0, 100.0, 110.0],
+            maturities=[1.0 / 365.0, 1.0 / 52.0, 1.0],
+            quantities=[10.0, -20.0, 30.0],
+            labels=["one_day", "one_week", "one_year"],
+        )
+        live, expiring = portfolio.split_at_horizon(1.0 / 252.0)
+        self.assertEqual([trade.label for trade in live.trades], ["one_week", "one_year"])
+        self.assertEqual([trade.label for trade in expiring], ["one_day"])
+        np.testing.assert_allclose(live.quantities, [-20.0, 30.0])
+        # The survivors must now price without tripping the maturity guard.
+        live.market_parameters(
+            np.array([[100.0]]), 0.01, maturity_shift=1.0 / 252.0
+        )
+
+    def test_split_at_horizon_keeps_the_whole_book_when_nothing_expires(self):
+        portfolio = Portfolio.from_arrays(strikes=[100.0, 110.0], maturities=[1.0, 2.0])
+        live, expiring = portfolio.split_at_horizon(1.0 / 252.0)
+        self.assertEqual(live.trades, portfolio.trades)
+        self.assertEqual(expiring, ())
+
+    def test_split_at_horizon_refuses_an_entirely_expired_book(self):
+        portfolio = Portfolio.from_arrays(strikes=[100.0], maturities=[1.0 / 365.0])
+        with self.assertRaisesRegex(ValueError, "expires within"):
+            portfolio.split_at_horizon(10.0 / 252.0)
+
+    def test_gbm_scenarios_match_analytical_moments_and_correlation(self):
+        config = PaperConfig()
+        generator = GBMScenarioGenerator.from_config(config)
+        spots = np.full(config.n_assets, 100.0)
+        rate, horizon = 0.03, 0.5
+        scenarios = generator.simulate(
+            spots, horizon, 200_000, rate=rate, rng=np.random.default_rng(11)
+        )
+        forward = 100.0 * math.exp(rate * horizon)
+        np.testing.assert_allclose(scenarios.mean(axis=0), forward, rtol=2e-3)
+
+        log_returns = np.log(scenarios / spots[None, :])
+        np.testing.assert_allclose(
+            log_returns.std(axis=0, ddof=1),
+            config.volatilities * math.sqrt(horizon),
+            rtol=2e-2,
+        )
+        np.testing.assert_allclose(
+            np.corrcoef(log_returns, rowvar=False), config.correlation, atol=1e-2
+        )
+
+    def test_antithetic_scenarios_pair_log_returns_exactly(self):
+        config = PaperConfig()
+        generator = GBMScenarioGenerator.from_config(config, drift=np.zeros(5))
+        spots = np.full(config.n_assets, 100.0)
+        scenarios = generator.simulate(
+            spots, 0.1, 8, rate=0.0, rng=np.random.default_rng(5), antithetic=True
+        )
+        log_returns = np.log(scenarios / spots[None, :])
+        np.testing.assert_allclose(log_returns[:4], -log_returns[4:], atol=1e-13)
+
+    def test_full_revaluation_losses_are_exact_for_a_linear_pricer(self):
+        config = PaperConfig()
+        portfolio = Portfolio.from_arrays(
+            strikes=[100.0, 120.0], maturities=[1.0, 2.0], quantities=[2.0, -1.0]
+        )
+        engine = MonteCarloVaREngine(
+            portfolio,
+            GBMScenarioGenerator.from_config(config),
+            horizon=10.0 / 252.0,
+            levels=(0.95, 0.99),
+        )
+        spots = np.full(config.n_assets, 100.0)
+
+        def linear_pricer(parameters):
+            # Value is the basket level, so P&L must not depend on strike or aging.
+            return parameters[:, : config.n_assets].mean(axis=1)
+
+        result = engine.run(
+            linear_pricer, spots, 0.03, n_scenarios=2_000, seed=config.seed
+        )
+        scenario_baskets = engine.simulate_spots(
+            spots, 2_000, 0.03, seed=config.seed
+        ).mean(axis=1)
+        expected_pnl = (scenario_baskets - 100.0) * portfolio.quantities.sum()
+        np.testing.assert_allclose(result.pnl, expected_pnl, atol=1e-10)
+        self.assertAlmostEqual(result.base_value, 100.0 * portfolio.quantities.sum())
+        self.assertEqual(result.pricer_evaluations, 2 * (1 + 2_000))
+
+    def test_expected_shortfall_contributions_add_up_to_portfolio_es(self):
+        config = PaperConfig()
+        portfolio = Portfolio.from_arrays(
+            strikes=[95.0, 105.0, 115.0],
+            maturities=[0.5, 1.0, 2.0],
+            quantities=[100.0, -50.0, 25.0],
+        )
+        engine = MonteCarloVaREngine(
+            portfolio,
+            GBMScenarioGenerator.from_config(config),
+            horizon=10.0 / 252.0,
+            levels=(0.99,),
+        )
+        spots = np.array([95.0, 100.0, 105.0, 90.0, 110.0])
+        result = engine.run(
+            EuropeanGeometricBasketPricer(config),
+            spots,
+            0.03,
+            n_scenarios=4_000,
+            seed=config.seed,
+        )
+        self.assertAlmostEqual(
+            float(result.contributions(0.99).sum()),
+            result.expected_shortfall(0.99),
+            places=9,
+        )
+        self.assertGreater(result.var(0.99), 0.0)
+        self.assertGreaterEqual(result.expected_shortfall(0.99), result.var(0.99))
+
+    def test_supplied_scenarios_make_two_pricers_a_paired_experiment(self):
+        config = PaperConfig()
+        portfolio = Portfolio.from_arrays(strikes=[100.0], maturities=[1.0])
+        engine = MonteCarloVaREngine(
+            portfolio,
+            GBMScenarioGenerator.from_config(config),
+            horizon=10.0 / 252.0,
+            levels=(0.99,),
+        )
+        spots = np.full(config.n_assets, 100.0)
+        scenario_spots = engine.simulate_spots(spots, 1_000, 0.03, seed=config.seed)
+        exact = EuropeanGeometricBasketPricer(config)
+        biased = lambda parameters: exact(parameters) * 1.01
+
+        reference = engine.run(
+            exact, spots, 0.03, scenario_spots=scenario_spots
+        )
+        surrogate = engine.run(
+            biased, spots, 0.03, scenario_spots=scenario_spots
+        )
+        comparison = compare_loss_distributions(
+            reference.losses, surrogate.losses, levels=(0.99,)
+        )
+        self.assertAlmostEqual(comparison["spearman_rank_correlation"], 1.0, places=12)
+        self.assertEqual(comparison["worst_scenario_overlap"], 1.0)
+        np.testing.assert_allclose(
+            surrogate.losses, 1.01 * reference.losses, atol=1e-10
+        )
+
+    def test_identical_loss_vectors_report_no_error(self):
+        rng = np.random.default_rng(1)
+        losses = rng.standard_normal(500)
+        comparison = compare_loss_distributions(losses, losses, levels=(0.95, 0.99))
+        self.assertEqual(comparison["loss_mae"], 0.0)
+        self.assertEqual(comparison["wasserstein_distance"], 0.0)
+        self.assertEqual(comparison["worst_scenario_overlap"], 1.0)
+        for summary in comparison["measures"].values():
+            self.assertEqual(summary["var_absolute_error"], 0.0)
+            self.assertEqual(summary["expected_shortfall_absolute_error"], 0.0)
+
+    def test_domain_coverage_counts_points_outside_the_grid_box(self):
+        points = np.array([[0.5, 0.5], [1.5, 0.5], [0.5, -0.2], [2.0, 3.0]])
+        coverage = domain_coverage(points, ((0.0, 1.0), (0.0, 1.0)))
+        self.assertEqual(coverage["points"], 4)
+        self.assertAlmostEqual(coverage["fraction_outside_any_axis"], 0.75)
+        np.testing.assert_allclose(coverage["fraction_outside_by_axis"], [0.5, 0.5])
+
+    def test_var_engine_on_the_grid_oracle_tracks_the_exact_loss_distribution(self):
+        config = PaperConfig()
+        grid, transform, _ = build_coordinate_grid(
+            config, "moneyness_adaptive", "geometric"
+        )
+        market_pricer = EuropeanGeometricBasketPricer(config)
+        model_pricer = TransformedPricer(market_pricer, transform)
+        portfolio = Portfolio.from_arrays(
+            strikes=[90.0, 100.0, 110.0],
+            maturities=[0.5, 1.0, 2.0],
+            quantities=[100.0, -75.0, 50.0],
+        )
+        engine = MonteCarloVaREngine(
+            portfolio,
+            GBMScenarioGenerator.from_config(config),
+            horizon=10.0 / 252.0,
+            levels=(0.99,),
+        )
+        spots = np.array([95.0, 100.0, 105.0, 90.0, 110.0])
+        scenario_spots = engine.simulate_spots(spots, 2_000, 0.03, seed=config.seed)
+
+        oracle = MarketCoordinatePricer(
+            lambda points: oracle_multilinear_predict(grid, model_pricer, points),
+            transform,
+        )
+        exact_result = engine.run(
+            market_pricer, spots, 0.03, scenario_spots=scenario_spots
+        )
+        oracle_result = engine.run(
+            oracle, spots, 0.03, scenario_spots=scenario_spots
+        )
+        comparison = compare_loss_distributions(
+            exact_result.losses, oracle_result.losses, levels=(0.99,)
+        )
+        # Scenario ranking survives interpolation; the VaR level itself carries
+        # the grid interpolation floor, which validate_portfolio_var.py measures.
+        self.assertGreater(comparison["spearman_rank_correlation"], 0.99)
+        self.assertEqual(comparison["worst_scenario_overlap"], 1.0)
+        self.assertLess(comparison["measures"]["0.99"]["var_relative_error"], 0.15)
+
 
 class GreekTests(unittest.TestCase):
     def test_curve_error_diagnostics_detects_shape_oscillation(self):
@@ -929,6 +1178,383 @@ class GreekTests(unittest.TestCase):
                 np.array([100.0, 90.0]),
                 spot_columns=(0, 0),
             )
+
+
+class VolatilityExtensionTests(unittest.TestCase):
+    """Per-underlying volatility dimensions, interleaved and on a log axis."""
+
+    def test_layout_interleaves_each_spot_with_its_own_volatility(self):
+        config = VolatilityExtendedConfig()
+        self.assertEqual(config.n_dimensions, 13)
+        self.assertEqual(config.spot_columns, (0, 2, 4, 6, 8))
+        self.assertEqual(config.volatility_columns, (1, 3, 5, 7, 9))
+        self.assertEqual(
+            config.physical_shape,
+            (32, 16, 32, 16, 32, 16, 32, 16, 32, 16, 64, 8, 8),
+        )
+        self.assertEqual(len(config.qtt_shape), 57)
+
+    def test_volatility_grid_is_uniform_in_log_sigma_over_the_stated_range(self):
+        config = VolatilityExtendedConfig()
+        grid, _, description = build_vol_extended_grid(config, "paper")
+        axis = grid.axes[config.volatility_columns[0]]
+        self.assertAlmostEqual(float(np.exp(axis[0])), 0.05)
+        self.assertAlmostEqual(float(np.exp(axis[-1])), 0.80)
+        np.testing.assert_allclose(np.diff(axis), np.diff(axis)[0])
+        self.assertEqual(description["volatility_coordinate"], "log(sigma)")
+        for column in config.volatility_columns:
+            np.testing.assert_allclose(grid.axes[column], axis)
+
+    def test_linear_volatility_axis_stays_in_sigma(self):
+        config = VolatilityExtendedConfig()
+        grid, transform, description = build_vol_extended_grid(
+            config, "paper", volatility_scale="linear"
+        )
+        axis = grid.axes[config.volatility_columns[0]]
+        self.assertAlmostEqual(float(axis[0]), 0.05)
+        self.assertAlmostEqual(float(axis[-1]), 0.80)
+        self.assertEqual(description["volatility_coordinate"], "sigma")
+        rng = np.random.default_rng(3)
+        x = sample_market_points(config, 8, rng)
+        np.testing.assert_allclose(transform.to_model(x), x)
+
+    def test_model_coordinates_round_trip(self):
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(11)
+        for mode in ("paper", "moneyness_adaptive"):
+            _, transform, _ = build_vol_extended_grid(config, mode)
+            x = sample_market_points(config, 32, rng)
+            np.testing.assert_allclose(
+                transform.to_market(transform.to_model(x)), x, atol=1e-10
+            )
+
+    def test_extended_pricer_matches_the_fixed_volatility_pricer(self):
+        paper = PaperConfig()
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(5)
+        x_paper = np.column_stack([rng.uniform(a, b, 25) for a, b in paper.bounds])
+        x = np.zeros((25, config.n_dimensions))
+        x[:, list(config.spot_columns)] = x_paper[:, : paper.n_assets]
+        x[:, list(config.volatility_columns)] = paper.volatilities
+        x[:, config.strike_column] = x_paper[:, paper.n_assets]
+        x[:, config.rate_column] = x_paper[:, paper.n_assets + 1]
+        x[:, config.maturity_column] = x_paper[:, paper.n_assets + 2]
+        np.testing.assert_allclose(
+            EuropeanGeometricBasketVolPricer(config)(x),
+            EuropeanGeometricBasketPricer(paper)(x_paper),
+            atol=1e-10,
+        )
+
+    def test_price_increases_with_every_single_volatility(self):
+        config = VolatilityExtendedConfig()
+        pricer = EuropeanGeometricBasketVolPricer(config)
+        rng = np.random.default_rng(17)
+        base = sample_market_points(config, 64, rng)
+        base[:, list(config.volatility_columns)] = 0.20
+        base[:, config.maturity_column] = np.clip(
+            base[:, config.maturity_column], 0.25, None
+        )
+        reference = pricer(base)
+        for column in config.volatility_columns:
+            bumped = base.copy()
+            bumped[:, column] = 0.30
+            self.assertTrue(np.all(pricer(bumped) > reference))
+
+    def test_per_row_volatilities_agree_with_row_by_row_pricing(self):
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(23)
+        x = sample_market_points(config, 12, rng)
+        spots = x[:, list(config.spot_columns)]
+        sigma = x[:, list(config.volatility_columns)]
+        batched = geometric_basket_put(
+            spots,
+            x[:, config.strike_column],
+            x[:, config.rate_column],
+            x[:, config.maturity_column],
+            sigma,
+            config.correlation,
+            config.dividends,
+        )
+        one_at_a_time = [
+            float(
+                geometric_basket_put(
+                    spots[i : i + 1],
+                    x[i, config.strike_column],
+                    x[i, config.rate_column],
+                    x[i, config.maturity_column],
+                    sigma[i],
+                    config.correlation,
+                    config.dividends,
+                )[0]
+            )
+            for i in range(len(x))
+        ]
+        np.testing.assert_allclose(batched, one_at_a_time, atol=1e-12)
+
+    def test_geometric_basket_put_rejects_mismatched_volatility_shape(self):
+        config = VolatilityExtendedConfig()
+        with self.assertRaisesRegex(ValueError, "one vector per row"):
+            geometric_basket_put(
+                np.full((4, 5), 100.0),
+                100.0,
+                0.02,
+                1.0,
+                np.full((3, 5), 0.2),
+                config.correlation,
+            )
+
+    def test_log_uniform_sampling_covers_the_volatility_range(self):
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(29)
+        x = sample_market_points(config, 4_000, rng, vol_sampling="log_uniform")
+        sigma = x[:, list(config.volatility_columns)]
+        self.assertGreaterEqual(float(sigma.min()), 0.05)
+        self.assertLessEqual(float(sigma.max()), 0.80)
+        # log-uniform means the median sits at the geometric, not arithmetic, mid
+        self.assertAlmostEqual(
+            float(np.median(sigma)), math.sqrt(0.05 * 0.80), delta=0.02
+        )
+
+
+    def test_basket_scaled_target_is_spot_free_and_recovers_the_price(self):
+        config = VolatilityExtendedConfig()
+        _, transform, _ = build_vol_extended_grid(config, "moneyness_adaptive")
+        model_pricer = TransformedPricer(
+            EuropeanGeometricBasketVolPricer(config), transform
+        )
+        scaled = BasketScaledModelPricer(model_pricer, config.spot_columns)
+
+        rng = np.random.default_rng(41)
+        z = transform.to_model(sample_market_points(config, 20, rng))
+        # rescaling by the basket reproduces the raw model-coordinate price
+        np.testing.assert_allclose(
+            scaled(z) * scaled.basket(z), model_pricer(z), rtol=1e-12
+        )
+        # in moneyness coordinates P / G does not depend on the spots at all
+        shuffled = z.copy()
+        shuffled[:, list(config.spot_columns)] = z[
+            ::-1, list(config.spot_columns)
+        ]
+        np.testing.assert_allclose(scaled(shuffled), scaled(z), rtol=1e-10)
+
+
+    def test_blocked_layout_reorders_columns_and_axes_consistently(self):
+        blocked = VolatilityExtendedConfig(layout="blocked")
+        self.assertEqual(blocked.spot_columns, (0, 1, 2, 3, 4))
+        self.assertEqual(blocked.volatility_columns, (5, 6, 7, 8, 9))
+        self.assertEqual(
+            blocked.physical_shape,
+            (32, 32, 32, 32, 32, 16, 16, 16, 16, 16, 64, 8, 8),
+        )
+        grid, _, description = build_vol_extended_grid(blocked, "moneyness_adaptive")
+        self.assertEqual(grid.shape, blocked.physical_shape)
+        self.assertEqual(description["layout"], "blocked")
+        # the same market point prices identically under either mode ordering
+        interleaved = VolatilityExtendedConfig(layout="interleaved")
+        rng = np.random.default_rng(61)
+        x = sample_market_points(interleaved, 16, rng)
+        reordered = np.empty_like(x)
+        for source, target in zip(
+            interleaved.spot_columns, blocked.spot_columns, strict=True
+        ):
+            reordered[:, target] = x[:, source]
+        for source, target in zip(
+            interleaved.volatility_columns, blocked.volatility_columns, strict=True
+        ):
+            reordered[:, target] = x[:, source]
+        for column in (
+            interleaved.strike_column,
+            interleaved.rate_column,
+            interleaved.maturity_column,
+        ):
+            reordered[:, column] = x[:, column]
+        np.testing.assert_allclose(
+            EuropeanGeometricBasketVolPricer(blocked)(reordered),
+            EuropeanGeometricBasketVolPricer(interleaved)(x),
+            rtol=1e-12,
+        )
+
+    def test_levy_arithmetic_is_homogeneous_and_below_the_geometric_put(self):
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(67)
+        spots = rng.uniform(30.0, 120.0, (40, 5))
+        sigma = np.full((40, 5), 0.20)   # low total vol, where Levy is tight
+        strikes = rng.uniform(40.0, 110.0, 40)
+        rates = rng.uniform(0.01, 0.05, 40)
+        maturities = rng.uniform(0.1, 1.0, 40)
+        levy = arithmetic_basket_put_levy(
+            spots, strikes, rates, maturities, sigma, config.correlation
+        )
+        self.assertTrue(np.all(levy >= -1e-12))
+        # AM-GM: the arithmetic basket dominates, so its put is worth less
+        geometric = geometric_basket_put(
+            spots, strikes, rates, maturities, sigma, config.correlation
+        )
+        self.assertTrue(np.all(levy <= geometric + 1e-9))
+        # positive homogeneity of degree one in (spots, strike)
+        scaled = arithmetic_basket_put_levy(
+            3.0 * spots, 3.0 * strikes, rates, maturities, sigma, config.correlation
+        )
+        np.testing.assert_allclose(scaled, 3.0 * levy, rtol=1e-10)
+
+    def test_monte_carlo_brackets_the_closed_form_geometric_price(self):
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(71)
+        spots = rng.uniform(40.0, 110.0, (8, 5))
+        sigma = np.full((8, 5), 0.25)
+        strikes = rng.uniform(50.0, 100.0, 8)
+        rates = np.full(8, 0.03)
+        maturities = np.full(8, 1.0)
+        exact = geometric_basket_put(
+            spots, strikes, rates, maturities, sigma, config.correlation
+        )
+        prices, standard_errors = basket_put_monte_carlo(
+            spots, strikes, rates, maturities, sigma, config.correlation,
+            60_000, basket_kind="geometric", seed=5,
+        )
+        # every estimate within four standard errors of the exact price
+        self.assertTrue(np.all(np.abs(prices - exact) < 4.0 * standard_errors + 1e-9))
+
+    def test_monte_carlo_respects_am_gm_between_basket_kinds(self):
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(73)
+        spots = rng.uniform(40.0, 110.0, (6, 5))
+        sigma = np.full((6, 5), 0.30)
+        strikes = rng.uniform(50.0, 100.0, 6)
+        rates = np.full(6, 0.02)
+        maturities = np.full(6, 1.5)
+        arithmetic, _ = basket_put_monte_carlo(
+            spots, strikes, rates, maturities, sigma, config.correlation,
+            40_000, basket_kind="arithmetic", seed=9,
+        )
+        geometric, _ = basket_put_monte_carlo(
+            spots, strikes, rates, maturities, sigma, config.correlation,
+            40_000, basket_kind="geometric", seed=9,
+        )
+        self.assertTrue(np.all(arithmetic <= geometric + 1e-9))
+
+    def test_arithmetic_vol_pricer_reads_the_configured_columns(self):
+        config = VolatilityExtendedConfig()
+        rng = np.random.default_rng(79)
+        x = sample_market_points(config, 10, rng)
+        np.testing.assert_allclose(
+            EuropeanArithmeticBasketVolPricer(config)(x),
+            arithmetic_basket_put_levy(
+                x[:, list(config.spot_columns)],
+                x[:, config.strike_column],
+                x[:, config.rate_column],
+                x[:, config.maturity_column],
+                x[:, list(config.volatility_columns)],
+                config.correlation,
+                config.dividends,
+            ),
+            rtol=1e-12,
+        )
+
+
+class FactorizedTTPredictionTests(unittest.TestCase):
+    def test_factorized_prediction_matches_the_corner_stencil(self):
+        config = replace(PaperConfig(), physical_shape=(8, 8, 8, 8, 8, 16, 4, 4))
+        grid, transform, _ = build_coordinate_grid(
+            config, "moneyness_adaptive", basket_kind="geometric"
+        )
+        pricer = TransformedPricer(EuropeanGeometricBasketPricer(config), transform)
+        model = TTPriceSurrogate(grid, pricer, seed=config.seed)
+        model.fit(2_000, anova_samples=200, log=False)
+
+        rng = np.random.default_rng(13)
+        x = np.column_stack([rng.uniform(a, b, 40) for a, b in config.bounds])
+        points = transform.to_model(x)
+        stencil = model.predict(points)
+        # the two paths sum the same terms in a different order, so agreement is
+        # judged against the scale of the surface rather than each tiny price
+        np.testing.assert_allclose(
+            model.predict_factorized(points),
+            stencil,
+            rtol=1e-9,
+            atol=1e-9 * float(np.max(np.abs(stencil))),
+        )
+
+    def test_factorized_prediction_is_exact_on_grid_nodes(self):
+        config = replace(PaperConfig(), physical_shape=(8, 8, 8, 8, 8, 16, 4, 4))
+        grid, transform, _ = build_coordinate_grid(
+            config, "paper", basket_kind="geometric"
+        )
+        pricer = TransformedPricer(EuropeanGeometricBasketPricer(config), transform)
+        model = TTPriceSurrogate(grid, pricer, seed=config.seed)
+        model.fit(2_000, anova_samples=200, log=False)
+
+        rng = np.random.default_rng(19)
+        indices = grid.random_physical_indices(50, rng)
+        on_grid = model.predict_on_grid(indices)
+        np.testing.assert_allclose(
+            model.predict_factorized(grid.indices_to_points(indices)),
+            on_grid,
+            rtol=1e-9,
+            atol=1e-9 * float(np.max(np.abs(on_grid))),
+        )
+
+    def test_factorized_cubic_matches_the_cubic_corner_stencil(self):
+        config = replace(PaperConfig(), physical_shape=(8, 8, 8, 8, 8, 16, 4, 4))
+        grid, transform, _ = build_coordinate_grid(
+            config, "moneyness_adaptive", basket_kind="geometric"
+        )
+        pricer = TransformedPricer(EuropeanGeometricBasketPricer(config), transform)
+        model = TTPriceSurrogate(grid, pricer, seed=config.seed)
+        model.fit(2_000, anova_samples=200, log=False)
+
+        rng = np.random.default_rng(23)
+        x = np.column_stack([rng.uniform(a, b, 25) for a, b in config.bounds])
+        points = transform.to_model(x)
+        for columns in ((5,), (5, 7), (0, 5, 7)):
+            stencil = model.predict_hybrid_cubic(
+                points, cubic_columns=columns, batch_size=4
+            )
+            np.testing.assert_allclose(
+                model.predict_factorized(points, cubic_columns=columns),
+                stencil,
+                rtol=1e-9,
+                atol=1e-9 * float(np.max(np.abs(stencil))),
+            )
+
+    def test_cubic_reproduces_a_cubic_function_exactly(self):
+        """A cubic axis must integrate a cubic polynomial with no error."""
+        grid = QTTGrid(((0.0, 1.0), (0.0, 1.0)), (16, 4))
+
+        def cubic_in_first_axis(points):
+            points = np.atleast_2d(points)
+            return 2.0 * points[:, 0] ** 3 - points[:, 0] + 3.0 * points[:, 1]
+
+        model = TTPriceSurrogate(grid, cubic_in_first_axis, seed=0)
+        model.fit(400, anova_samples=200, log=False)
+        rng = np.random.default_rng(29)
+        points = np.column_stack((rng.uniform(0, 1, 40), rng.uniform(0, 1, 40)))
+        truth = cubic_in_first_axis(points)
+        cubic = model.predict_factorized(points, cubic_columns=(0,))
+        linear = model.predict_factorized(points)
+        self.assertLess(float(np.max(np.abs(cubic - truth))), 1e-8)
+        self.assertGreater(float(np.max(np.abs(linear - truth))), 1e-4)
+
+    def test_cubic_axis_names_resolve_to_columns(self):
+        config = VolatilityExtendedConfig(layout="blocked")
+        self.assertEqual(resolve_cubic_columns(config, ["none"]), ())
+        self.assertEqual(
+            resolve_cubic_columns(config, ["all"]), tuple(range(13))
+        )
+        self.assertEqual(resolve_cubic_columns(config, ["m"]), (10,))
+        self.assertEqual(
+            resolve_cubic_columns(config, ["vols", "m"]), (5, 6, 7, 8, 9, 10)
+        )
+        with self.assertRaisesRegex(ValueError, "unknown cubic axis"):
+            resolve_cubic_columns(config, ["nope"])
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            resolve_cubic_columns(config, ["none", "m"])
+
+    def test_factorized_prediction_requires_a_fit(self):
+        grid = QTTGrid(((0.0, 1.0), (0.0, 1.0)), (4, 4))
+        model = TTPriceSurrogate(grid, lambda x: np.zeros(len(x)))
+        with self.assertRaisesRegex(RuntimeError, "fit the surrogate first"):
+            model.predict_factorized(np.array([[0.5, 0.5]]))
 
 
 class KernelTests(unittest.TestCase):

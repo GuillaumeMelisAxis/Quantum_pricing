@@ -1,0 +1,2525 @@
+\documentclass{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,
+            linkcolor=blue,
+            citecolor=blue,
+            urlcolor=blue]{hyperref}
+\usepackage{url}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning}
+\numberwithin{equation}{subsection}
+% Mathematical theorem environments
+\usepackage{amsthm}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{assumption}[theorem]{Assumption}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+\title{Homogeneity-Based Coordinates and Adaptive Grids for Tensor-Train Surrogates in Multi-Asset Option Pricing}
+\author{Guillaume Melis^1 \\Antonin Decouvelaere^1 \\Ichak Koutchoukali^2}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+\textit{Keywords: Tensor Network, adaptive discretization, option pricing}
+\begin{abstract}
+\textit{This paper develops a coordinate-adaptive discretization for the Singularity
+Tensor Network pricing framework of Gribben et al.\ \cite{Gribben2026STNGPR}. A tensor-train surrogate reconstructs a discretized price surface from a small number of black-box pricer calls and interpolates between nodes.
+The original uniform grid uses absolute strike as a tensor coordinate and may
+therefore resolve the high-curvature at-the-money region unevenly across spot
+configurations. We exploit the positive homogeneity of basket-option prices to
+factor out the basket scale and replace absolute strike with basket
+log-moneyness. A hyperbolic-sine grid then concentrates interpolation nodes near
+the at-the-money region, while an additional transformation refines short
+maturities, without changing the underlying Quantized Tensor-Train
+architecture. In the European benchmark, the resulting representation reduces
+the effective rank from \(21.45\) to \(7.35\), the price mean absolute error from
+\(0.648\) to \(0.0831\), and the measured prediction time by \(83.3\%\), reaching
+the interpolation-error floor of the adaptive grid. For American options, the
+same coordinate design lowers the mean error and its dispersion across
+reconstruction seeds, although the effective ranks remain broadly unchanged
+and accuracy is partly limited by the bias and sampling noise of the least-squares
+Monte Carlo pricing oracle. Once built, the resulting grid supports near-instantaneous repricing across strikes and maturities via interpolation, making it well suited for fast, on-demand pricing in trading workflows. These results show that coordinate design is a
+structural component of accurate and efficient Tensor-Train pricing surrogates.}
+\end{abstract}
+
+\newpage
+\section{Introduction}
+%\subsection{Motivation}
+Derivative pricing becomes computationally expensive when closed-form solutions are unavailable, particularly for path-dependent, early-exercise, or multi-asset payoffs.Basket options are a central example: beyond three or four underlyings, standard grid-based PDE solvers and lattice methods scale exponentially in the number of assets, and even Monte Carlo methods become expensive to run repeatedly. While numerical methods remain tractable for a single valuation, their repeated use for large portfolios, Greeks, calibration, or market-risk calculations may require millions of costly valuations. Surrogate models can help reduce this burden by learning a discretized price surface from a small number of black-box pricer calls and interpolates prices between grid nodes, avoiding both the need to solve the pricing problem directly at every query and the exponential grid size a naive discretization would require.
+However, conventional surrogates approaches remain affected by the curse of dimensionality.\\
+\\
+Gribben et al.\ \cite{Gribben2026STNGPR} introduced STN-GPR, a framework combining Gaussian process regression with Tensor-Train representations constructed through TT-cross approximation \cite{oseledets2010ttcross,oseledets2011tensorTrain}. Each discretized coordinate is further split into binary modes, so that the pricing tensor is represented in Quantized Tensor-Train (QTT) form, in order to reduce storage complexity. However, the framework's efficiency also depends on how that discretization is chosen. Uniform grids may oversample smooth regions while providing insufficient resolution near at-the-money configurations, short maturities, or American exercise frontiers, where option prices exhibit stronger curvature. This motivates the use of homogeneous log-moneyness coordinates and convexity-guided non-uniform QTT grids to improve approximation accuracy without increasing the overall grid size.\\
+%\subsection{Limitations of uniform high-dimensional pricing grids}
+\\Tensor-Train and TT-cross methods reduce storage and the number of pricer
+calls by exploiting low-rank structure, but they inherit the discretization
+error of the underlying grid: with $n_j$ nodes along dimension $j$, a full
+tensor-product grid contains
+\[
+N_{\mathrm{full}}=\prod_{j=1}^{d} n_j
+\]
+points, and refining it uniformly removes that error only by enlarging the
+tensorized domain and raising the cost of TT-cross construction. We therefore
+hold the QTT-compatible node count fixed and act on node placement instead. This allows the grid to concentrate resolution in financially relevant regions without increasing its nominal
+tensor size.\\
+\\
+% A uniform grid implicitly assumes that the pricing function requires the same resolution throughout the parameter domain. This assumption is poorly suited to option-pricing surfaces. Prices are generally smooth and nearly linear far from the strike, whereas stronger curvature appears near at-the-money configurations. Similar local variations arise for short maturities and around the early-exercise frontier of American options. Consequently, a uniform grid allocates many nodes to smooth regions while providing insufficient resolution where the price and its derivatives change most rapidly.\\
+% \\
+% Increasing the number of uniform nodes can reduce this error, but it also enlarges the tensorized domain and raises the cost of TT-cross construction. A more efficient approach is therefore to preserve the QTT-compatible number of nodes while modifying their physical locations. This allows the grid to concentrate resolution in financially relevant regions without increasing its nominal tensor size.\\
+% \\
+%\subsection{Contributions}
+The contributions of this work are fourfold:
+\begin{enumerate}
+\item We reproduce the STN-GPR framework for European and American multi-asset options and evaluate it against Gaussian process regression under comparable training budgets.
+\item We exploit the homogeneity of option prices to express the pricing surface in normalized log-moneyness coordinates, reducing scale dependence and concentrating the approximation on financially meaningful variables.
+\item We introduce a convexity-guided non-uniform grid that concentrates nodes around the at-the-money region while preserving the power-of-two structure required for QTT tensorization. Its performance is assessed through fixed-budget ablation and robustness experiments against the corresponding uniform grid.
+\item We provide a detailed error analysis using analytical European benchmarks and independently generated American LSMC labels. For American options, we additionally separate surrogate approximation error from Monte Carlo label noise and examine the accuracy of the early-exercise region.
+\end{enumerate}
+%\subsection{Outline of the paper}
+The remainder of the paper is organized as follows. Section~2 reviews the STN-GPR framework and identifies its main limitations. Section~3 introduces the homogeneity-based transformation and log-moneyness coordinates, while Section~4 presents the convexity-guided adaptive QTT grid. Section~5 describes the error decomposition and validation protocol. Sections~6 report the European and American option experiments, respectively, including the effects of LSMC noise on the exercise frontier. Finally, Section~7 discusses the results and concludes the paper.
+\section{The STN-GPR Framework and Its Limitations}
+\label{sec:stn-framework}
+\subsection{Tensor-Train and Quantized Tensor-Train Representations}
+\label{subsec:tt-qtt}
+Let \(d\in\mathbb{N}^{*}\) denote the number of pricing variables and let
+\(V:\Omega\subset\mathbb{R}^{d}\to\mathbb{R}\) be the associated pricing function.
+For each coordinate \(k\in\{1,\ldots,d\}\), consider a grid of
+\(n_k\in\mathbb{N}\), \(n_k\geq 2\), nodes denoted by
+\(\{x_{k,i_k}\}_{i_k=0}^{n_k-1}\).
+The discretization of \(V\) on the resulting Cartesian grid defines the tensor
+\begin{equation}
+\mathcal{A}_{i_1,\ldots,i_d}
+=
+V\!\left(
+x_{1,i_1},\ldots,x_{d,i_d}
+\right)
+\end{equation}
+where
+\begin{equation}
+\mathcal{A}\in\mathbb{R}^{n_1\times\cdots\times n_d},
+\qquad
+0\leq i_k<n_k,
+\qquad
+k=1,\ldots,d
+\end{equation}
+A tensor is formally an element of a tensor-product space; once bases are fixed,
+it can be represented as a multidimensional array. A tensor network represents
+such an array as a collection of lower-order tensors whose shared indices are
+contracted. The Tensor-Train (TT) representation is the particular tensor-network
+topology in which the component tensors form a one-dimensional chain
+\cite{oseledets2011tensorTrain}. It is equivalent to a matrix product state with
+open boundary conditions \cite{orus2014tensorNetworks}.\\
+\\
+%\paragraph{Tensor-Train representation.}
+A \textbf{Tensor-Train (TT)} representation of
+\(\mathcal{A}\in\mathbb{R}^{n_1\times\cdots\times n_d}\)
+expresses its entries as
+\begin{equation}
+\mathcal{A}_{i_1,\ldots,i_d}
+=
+\sum_{\alpha_1=1}^{r_1}
+\cdots
+\sum_{\alpha_{d-1}=1}^{r_{d-1}}
+G^{(1)}_{1,i_1,\alpha_1}
+G^{(2)}_{\alpha_1,i_2,\alpha_2}
+\cdots
+G^{(d)}_{\alpha_{d-1},i_d,1}
+\end{equation}
+where the TT cores satisfy
+\begin{equation}
+G^{(k)}
+\in
+\mathbb{R}^{r_{k-1}\times n_k\times r_k},
+\qquad
+r_0=r_d=1
+\end{equation}
+The integers
+\(\boldsymbol{r}=(r_0,r_1,\ldots,r_d)\)
+are the TT ranks. Their minimal values are determined by the ranks of the
+successive tensor unfoldings
+\begin{equation}
+r_k
+=
+\operatorname{rank}
+\left(
+\mathcal{A}^{\langle k\rangle}
+\right),
+\qquad
+k=1,\ldots,d-1
+\label{eq:tt-unfolding-rank}
+\end{equation}
+where
+\begin{equation}
+\mathcal{A}^{\langle k\rangle}
+\in
+\mathbb{R}^{(n_1\cdots n_k)\times(n_{k+1}\cdots n_d)}
+\end{equation}
+denotes the matricization that separates the first \(k\) modes from the
+remaining \(d-k\) modes.\\
+\\
+Every finite-dimensional tensor admits an exact TT representation, although
+the representation is computationally advantageous only when the TT ranks
+remain sufficiently small. Its storage cost is
+\begin{equation}
+\sum_{k=1}^{d} n_k r_{k-1}r_k
+\label{eq:tt-storage}
+\end{equation}
+Defining
+\begin{equation}
+n=\max_{1\leq k\leq d}n_k,
+\qquad
+r=\max_{0\leq k\leq d}r_k
+\end{equation}
+gives the upper bound
+\begin{equation}
+\sum_{k=1}^{d} n_k r_{k-1}r_k
+\leq dnr^2
+\end{equation}
+Thus, TT storage scales as
+\(\mathcal{O}(dnr^2)\), compared with
+\(\mathcal{O}(n^d)\) for a full tensor when \(n_k=n\) for all \(k\).
+%In practice, an exact representation is unnecessary. Given a tolerance
+%$\varepsilon>0$, the objective is to construct an approximation
+%$\widehat{\mathcal{A}}$ satisfying
+%\begin{equation}
+%\frac{\left\|\mathcal{A}-\widehat{\mathcal{A}} \right\|_F}{\left\| \mathcal{A} \right\|_F} \leq \varepsilon
+%\end{equation}
+%with ranks as small as possible. The efficiency of the representation therefore
+%depends on approximate low-rank structure in the selected TT ordering. This
+%property is not implied by smoothness alone: the ranks also depend on parameter
+%interactions, coordinate transformations, mode ordering, and localized
+%structures such as payoff kinks or exercise boundaries.
+%\paragraph{Quantized Tensor-Train representation.}
+\\
+\\
+The \textbf{Quantized Tensor-Train (QTT)} representation further decomposes
+each discrete mode into a collection of binary modes. Assume, for simplicity,
+that
+\begin{equation}
+n_k=2^{L_k},
+\qquad
+L_k=\log_2 n_k
+\end{equation}
+Each grid index \(i_k\in\{0,\ldots,n_k-1\}\) can then be expressed through its
+binary expansion
+\begin{equation}
+i_k
+=
+\sum_{\ell=1}^{L_k}
+2^{L_k-\ell}b_{k,\ell},
+\qquad
+b_{k,\ell}\in\{0,1\}
+\end{equation}
+The original tensor is thereby reshaped into the higher-order binary tensor
+defined by
+\begin{equation}
+\mathcal{A}_{i_1,\ldots,i_d}
+=
+\widetilde{\mathcal{A}}_{b_{1,1},\ldots,b_{1,L_1},
+\ldots,b_{d,1},\ldots,b_{d,L_d}}
+\end{equation}
+whose order is
+\begin{equation}
+L
+=
+\sum_{k=1}^{d}L_k
+\end{equation}
+A TT decomposition is then applied to
+\(\widetilde{\mathcal{A}}\). If its QTT ranks are bounded by
+\(r_{\mathrm{QTT}}\), the storage complexity becomes
+\begin{equation}
+\mathcal{O}\!\left(
+r_{\mathrm{QTT}}^2
+\sum_{k=1}^{d}\log_2 n_k
+\right)
+\end{equation}
+For \(n_k=n\), this reduces to
+\begin{equation}
+\mathcal{O}\!\left(
+d\,r_{\mathrm{QTT}}^2\log_2 n
+\right)
+\end{equation}
+Quantization is an exact reshaping of the tensor indices and therefore
+introduces no approximation by itself. Compression occurs only when the
+reshaped tensor admits a low-rank TT representation. Moreover, low TT ranks
+for the original tensor do not necessarily imply low QTT ranks after
+quantization. The latter depend on the multiscale structure of the indexed
+data, the binary encoding convention, and the ordering of the quantized modes.
+Throughout this work, the binary modes associated with each pricing variable
+are kept contiguous and ordered from the most significant to the least
+significant bit.\\
+\\
+Quantization acts on the discrete indices rather than on the physical
+locations of the grid nodes. These locations may therefore be defined through
+a strictly increasing mapping
+\begin{equation}
+x_{k,i}
+=
+\phi_k\!\left(
+\frac{i}{n_k-1}
+\right),
+\qquad
+i=0,\ldots,n_k-1
+\label{eq:grid_nodes}
+\end{equation}
+where \(\phi_k:[0,1]\to\Theta_k\). Affine mappings generate uniform grids,
+whereas nonlinear mappings generate non-uniform grids without altering the
+binary tensorization. This flexibility will later be used to adapt the
+physical grid to the geometry of the pricing function.\\
+\\
+The TT and QTT representations compress only the values defined at the grid
+nodes. They neither determine these values nor define the pricing function
+away from the grid. The former problem is addressed through TT-cross
+reconstruction, while the latter requires an off-grid interpolation
+procedure.
+\subsection{TT-Cross Reconstruction}
+\label{subsec:tt-cross}
+Evaluating every entry of
+\(\mathcal{A}\in\mathbb{R}^{n_1\times\cdots\times n_d}\)
+requires
+\begin{equation}
+N_{\mathrm{full}} = \prod_{k=1}^{d} n_k
+\end{equation}
+calls to the pricing function. TT-cross avoids this exhaustive construction by
+accessing individual tensor entries through the oracle
+\begin{equation}
+(i_1,\ldots,i_d) \longmapsto \mathcal{A}_{i_1,\ldots,i_d} = V(x_{1,i_1},\ldots,x_{d,i_d})
+\end{equation}
+and adaptively selecting a subset of entries from which a TT approximation is
+constructed \cite{oseledets2010ttcross}.\\
+\\
+TT-cross extends matrix skeleton interpolation to higher-order tensors. To
+introduce the underlying principle, let
+\(A\in\mathbb{R}^{m\times n}\), where \(m,n\in\mathbb{N}^{*}\), and choose an
+integer \(r\leq\min(m,n)\). Let
+\begin{equation}
+I\subseteq\{1,\ldots,m\},
+\qquad
+J\subseteq\{1,\ldots,n\},
+\qquad
+|I|=|J|=r
+\end{equation}
+If the pivot submatrix \(A(I,J)\in\mathbb{R}^{r\times r}\) is nonsingular, the
+associated skeleton approximation is
+\begin{equation}
+A \approx A(:,J)\,A(I,J)^{-1}A(I,:)
+\end{equation}
+where \(A(:,J)\in\mathbb{R}^{m\times r}\) contains the selected columns and
+\(A(I,:)\in\mathbb{R}^{r\times n}\) contains the selected rows.
+If \(\operatorname{rank}(A)=r\), then any nonsingular \(r\times r\) pivot
+submatrix yields the exact identity
+\begin{equation}
+A = A(:,J)\,A(I,J)^{-1}A(I,:)
+\end{equation}
+When \(\operatorname{rank}(A)>r\), the formula instead defines a rank-\(r\)
+approximation whose accuracy and numerical stability depend on the selected
+rows and columns. In particular, an ill-conditioned pivot matrix may amplify
+the approximation and rounding errors through \(A(I,J)^{-1}\).\\
+\\
+A common selection principle is therefore to seek a pivot submatrix with large
+volume, defined by
+\begin{equation}
+\operatorname{vol}\!\left(A(I,J)\right) = \left|\det A(I,J)\right|
+\end{equation}
+A globally maximal-volume submatrix is generally too expensive to compute.
+Practical cross algorithms instead use greedy \emph{maxvol} procedures to find
+a locally dominant submatrix, providing a tractable and numerically stable
+choice of interpolation pivots.\\
+\\
+The same principle extends recursively to multidimensional tensors. For each
+interface $k=1,\ldots,d-1$, TT-cross introduces left multi-indices
+\[
+\mathcal{I}_{\leq k}
+\subset
+\{0,\ldots,n_1-1\}
+\times\cdots\times
+\{0,\ldots,n_k-1\}
+\]
+and right multi-indices
+\[
+\mathcal{J}_{>k}
+\subset
+\{0,\ldots,n_{k+1}-1\}
+\times\cdots\times
+\{0,\ldots,n_d-1\}
+\]
+with $\left| \mathcal{I}_{\leq k} \right| = \left| \mathcal{J}_{>k} \right| = r_k$. We also set $\mathcal{I}_{<1}=\{\varnothing\}$ and $\mathcal{J}_{>d}=\{\varnothing\}$. The index sets are nested: each element of $\mathcal{I}_{\leq k}$ extends an element of $\mathcal{I}_{<k}$ by one physical index, with an analogous construction for the right indices. At interface $k$, define the pivot matrix
+\begin{equation}
+P_k = \mathcal{A} \left( \mathcal{I}_{\leq k}, \mathcal{J}_{>k} \right) \in \mathbb{R}^{r_k\times r_k}
+\end{equation}
+Assuming nonsingular pivots, the tensor is reconstructed from cross sections
+\[
+\mathcal{A}
+\left(
+\mathcal{I}_{<k},
+i_k,
+\mathcal{J}_{>k}
+\right)
+\]
+and the corresponding TT cores can be written schematically as
+\begin{equation}
+G^{(k)}(i_k) = \mathcal{A} \left( \mathcal{I}_{<k}, i_k, \mathcal{J}_{>k} \right) P_k^{-1}, \qquad k=1,\ldots,d-1
+\end{equation}
+with $G^{(d)}(i_d) = \mathcal{A} \left( \mathcal{I}_{<d}, i_d \right)$. The resulting approximation takes the standard TT form
+\begin{equation}
+\widehat{\mathcal{A}}(i_1,\ldots,i_d) = G^{(1)}(i_1) G^{(2)}(i_2) \cdots G^{(d)}(i_d)
+\end{equation}
+For an exact tensor of TT ranks $(r_1,\ldots,r_{d-1})$, appropriately selected
+nested cross indices recover the tensor exactly in exact arithmetic. In
+practice, pivot systems are solved through stable matrix factorizations rather
+than by explicitly computing $P_k^{-1}$.
+The interpolation sets are constructed iteratively through alternating
+left-to-right and right-to-left sweeps over the tensor modes. At mode \(k\),
+TT-cross evaluates a subtensor indexed by the current left and right
+interpolation sets, reshapes it into a matrix, and applies a rank-revealing
+factorization followed by a \emph{maxvol} selection. The selected rows or
+columns update the interpolation sets and the corresponding TT core.
+Alternating sweeps refine these quantities until a prescribed stopping
+criterion is satisfied. Rank-adaptive variants additionally enrich the
+interpolation spaces when the current ranks are insufficient
+\cite{oseledets2010ttcross,chertkov2023anovaTT}.\\
+\\
+If \(n_k\leq n\) and the intermediate TT ranks are bounded by \(r\), one sweep
+typically requires
+\begin{equation}
+\mathcal{O}\!\left(dnr^2\right)
+\end{equation}
+oracle evaluations and
+\begin{equation}
+\mathcal{O}\!\left(dnr^3\right)
+\end{equation}
+arithmetic operations. In QTT form, where
+\begin{equation}
+L=\sum_{k=1}^{d}L_k
+\end{equation}
+is the number of binary modes, these estimates become
+\(\mathcal{O}(Lr^2)\) and \(\mathcal{O}(Lr^3)\), respectively. These
+complexities are conditional on the rank bound: they do not guarantee
+dimension-independent performance because the required ranks may increase
+with the complexity of the pricing tensor.\\
+\\
+Oracle calls are cached so that repeated requests for the same tensor entry do
+not trigger additional pricing evaluations. Computational cost is therefore
+measured by the number of distinct queried indices
+\begin{equation}
+N_{\mathrm{eval}}
+=
+\left|
+\bigcup_s \Omega_s
+\right|
+\end{equation}
+where \(\Omega_s\) denotes the set of indices requested during block update
+\(s\).
+Internal convergence is monitored through the relative change between
+successive reconstructions
+\begin{equation}
+\varepsilon_{\mathrm{sweep}}^{(s)}
+=
+\frac{
+\left\|
+\widehat{\mathcal{A}}^{(s)}
+-
+\widehat{\mathcal{A}}^{(s-1)}
+\right\|_F
+}{
+\left\|
+\widehat{\mathcal{A}}^{(s)}
+\right\|_F
+}
+\end{equation}
+with $||.||_F$ the Frobenius norm. 
+Accuracy is assessed independently on a set
+\(\Omega_{\mathrm{val}}\) excluded from reconstruction
+\begin{equation}
+\varepsilon_{\mathrm{val}}
+=
+\left[
+\frac{
+\displaystyle
+\sum_{\boldsymbol{i}\in\Omega_{\mathrm{val}}}
+\left|
+\mathcal{A}(\boldsymbol{i})
+-
+\widehat{\mathcal{A}}(\boldsymbol{i})
+\right|^2
+}{
+\displaystyle
+\sum_{\boldsymbol{i}\in\Omega_{\mathrm{val}}}
+\left|
+\mathcal{A}(\boldsymbol{i})
+\right|^2
+}
+\right]^{1/2}
+\end{equation}
+The sweep criterion measures algorithmic stabilization and does not constitute
+an accuracy bound on unseen tensor entries.\\
+\\
+When the pricing oracle is simulation-based, common random numbers and a fixed
+random seed are used during reconstruction. TT-cross then operates on a fixed
+random realization of the pricing tensor rather than on inconsistent values
+generated at successive calls. Accuracy with respect to the underlying option
+price is subsequently assessed using independent simulations.
+\subsection{Off-Grid Interpolation and Gaussian-Process Interpretation}
+\label{subsec:off-grid-interpolation}
+Let $\boldsymbol{x}$ be a parameter vector that does not coincide with a grid node :
+\begin{equation}
+    \boldsymbol{x} = (x_1,\ldots,x_d) \in \Theta = \Theta_1\times\cdots\times\Theta_d
+\end{equation}
+The reconstructed
+tensor $\widehat{\mathcal{A}}$ must then be combined with an interpolation
+operator to define an off-grid pricing surrogate.
+That's why, we mathematically define multilinear interpolation. 
+For each coordinate $k$, let
+\[
+x_{k,j_k}
+\leq
+x_k
+\leq
+x_{k,j_k+1}
+\]
+denote the neighboring grid nodes and define
+\begin{equation}
+t_k(\boldsymbol{x}) = \frac{x_k-x_{k,j_k}} {x_{k,j_k+1}-x_{k,j_k}} \in[0,1]
+\end{equation}
+with interpolation weights $w_{k,0}(\boldsymbol{x}) = 1-t_k(\boldsymbol{x})$ and  $w_{k,1}(\boldsymbol{x}) = t_k(\boldsymbol{x})$.  Let $\boldsymbol{j} = (j_1,\ldots,j_d)$ denote the lower corner of the corresponding grid cell. The multilinear interpolant is
+\begin{equation}
+\widehat{V}_{\mathrm{TT}}(\boldsymbol{x}) = \sum_{\boldsymbol{b}\in\{0,1\}^d} \left[ \prod_{k=1}^{d} w_{k,b_k}(\boldsymbol{x}) \right] \widehat{\mathcal{A}} (j_1+b_1,\ldots,j_d+b_d)
+\end{equation}
+The weights are nonnegative and satisfy
+\begin{equation}
+\sum_{\boldsymbol{b}\in\{0,1\}^d} \prod_{k=1}^{d} w_{k,b_k}(\boldsymbol{x}) = 1
+\end{equation}
+so that the interpolant is a convex combination of the $2^d$ corner values. \\
+\\
+When $\widehat{\mathcal{A}}$ is directly available in TT form, interpolation can
+also be incorporated into the tensor contraction. If $G^{(k)}(i_k) \in \mathbb{R}^{r_{k-1}\times r_k}$
+denotes the $k$th TT core slice, define
+\begin{equation}
+B^{(k)}(x_k) = w_{k,0}(\boldsymbol{x})G^{(k)}(j_k) + w_{k,1}(\boldsymbol{x})G^{(k)}(j_k+1)
+\end{equation}
+Then
+\begin{equation}
+\widehat{V}_{\mathrm{TT}}(\boldsymbol{x}) = B^{(1)}(x_1) B^{(2)}(x_2) \cdots B^{(d)}(x_d)
+\end{equation}
+which avoids explicitly constructing all $2^d$ corner values. Equivalently, defining the rank-one interpolation tensor
+\begin{equation}
+\mathcal{W}(\boldsymbol{x}) = \boldsymbol{w}_1(x_1) \otimes\cdots\otimes \boldsymbol{w}_d(x_d)
+\end{equation}
+gives
+\begin{equation}
+\widehat{V}_{\mathrm{TT}}(\boldsymbol{x}) = \left\langle \widehat{\mathcal{A}}, \mathcal{W}(\boldsymbol{x}) \right\rangle
+\end{equation}
+Where $\langle .,.\rangle$ is the Frobenius inner product between two tensors of identical dimensions. In our implementation, the same interpolated value is obtained by evaluating
+the reconstructed QTT at the relevant cell corners and applying the multilinear
+weights.
+Now, denoting $\mathcal{I}_h$ the multilinear interpolation operator associated
+with the physical grid. The complete TT surrogate is
+\begin{equation}
+\widehat{V}_{\mathrm{TT}}(\boldsymbol{x}) = \mathcal{I}_h\widehat{\mathcal{A}}(\boldsymbol{x})
+\end{equation}
+Its error admits the decomposition
+\begin{equation}
+V(\boldsymbol{x})
+-
+\widehat{V}_{\mathrm{TT}}(\boldsymbol{x})
+=
+\underbrace{
+V(\boldsymbol{x})
+-
+\mathcal{I}_h\mathcal{A}(\boldsymbol{x})
+}_{\text{grid interpolation error}}
++
+\underbrace{
+\mathcal{I}_h
+\left(
+\mathcal{A}-\widehat{\mathcal{A}}
+\right)(\boldsymbol{x})
+}_{\text{propagated TT reconstruction error}}
+\label{eq:deterministic-error-decomposition}
+\end{equation}
+This decomposition will be used throughout the remainder of the paper. It
+separates the error imposed by the physical grid from the error introduced by
+the tensor reconstruction.\\
+\\
+Since multilinear interpolation is a convex combination of nodal values, we can upper bound it this way 
+\begin{equation}
+\left|
+\mathcal{I}_h
+\left(
+\mathcal{A}-\widehat{\mathcal{A}}
+\right)(\boldsymbol{x})
+\right|
+\leq
+\max_{\boldsymbol{b}\in\{0,1\}^d}
+\left|
+\mathcal{A}(\boldsymbol{j}+\boldsymbol{b})
+-
+\widehat{\mathcal{A}}(\boldsymbol{j}+\boldsymbol{b})
+\right|
+\end{equation}
+Hence interpolation does not amplify the maximum nodal reconstruction error
+inside a cell.\\
+\\
+Let
+\begin{equation}
+C_{\boldsymbol{j}} = \prod_{k=1}^{d} [x_{k,j_k},x_{k,j_k+1}]
+\end{equation}
+denote the cell containing $\boldsymbol{x}$ and define
+\begin{equation}
+h_{k,\boldsymbol{j}} = x_{k,j_k+1}-x_{k,j_k}
+\end{equation}
+If $V$ is twice continuously differentiable inside $C_{\boldsymbol{j}}$, a
+standard local estimate gives
+\[
+\left|
+V(\boldsymbol{x})
+-
+\mathcal{I}_h\mathcal{A}(\boldsymbol{x})
+\right|
+\leq
+\frac{1}{8}
+\sum_{k=1}^{d}
+h_{k,\boldsymbol{j}}^2
+\sup_{\boldsymbol{z}\in C_{\boldsymbol{j}}}
+\left|
+\frac{\partial^2 V}
+{\partial x_k^2}(\boldsymbol{z})
+\right|
+\]
+The interpolation error is therefore controlled jointly by the local grid
+spacing and the directional curvature of the pricing surface. This observation
+will motivate the adaptive grids introduced later.\\
+\\
+Multilinear interpolation can also be interpreted through a limiting
+Gaussian-process construction. Consider first a zero-mean Gaussian process in
+one dimension with Laplacian covariance kernel
+\begin{equation}
+k_{\ell}(x,x')
+=
+\exp\!\left(
+-\frac{|x-x'|_1}{\ell}
+\right),
+\qquad
+\ell>0
+\end{equation}
+where $\ell$ is the sole hyperparameter of the kernel and $|.|_1$ is the 1-Manhattan distance. 
+Given noiseless observations
+\(\boldsymbol{y}=(y_1,\ldots,y_N)^{\mathsf T}\) at distinct nodes
+\(X=\{x_1,\ldots,x_N\}\), the posterior mean is
+\begin{equation}
+\mu_{\ell}(x)
+=
+\boldsymbol{k}_{\ell}(x,X)^{\mathsf T}
+K_{\ell}(X,X)^{-1}
+\boldsymbol{y}
+\end{equation}
+where
+\begin{equation}
+\boldsymbol{k}_{\ell}(x,X)
+=
+\begin{pmatrix}
+k_{\ell}(x,x_1) &
+\cdots &
+k_{\ell}(x,x_N)
+\end{pmatrix}^{\mathsf T}
+\end{equation}
+and the Gram matrix
+\(K_{\ell}(X,X)\in\mathbb{R}^{N\times N}\) is defined entrywise by
+\begin{equation}
+\bigl[K_{\ell}(X,X)\bigr]_{ij}
+=
+k_{\ell}(x_i,x_j),
+\qquad
+i,j=1,\ldots,N
+\end{equation}
+For $x\in[x_j,x_{j+1}]$, the Markov structure of the exponential covariance
+implies that the posterior mean depends only on the two neighboring
+observations. Using
+\begin{equation}
+\sinh\!\left(\frac{z}{L}\right) = \frac{z}{L} + \mathcal{O}\!\left(L^{-3}\right), \qquad L\rightarrow\infty
+\end{equation}
+gives
+\[
+\mu_L(x)
+\longrightarrow
+y_j
+\frac{x_{j+1}-x}
+{x_{j+1}-x_j}
++
+y_{j+1}
+\frac{x-x_j}
+{x_{j+1}-x_j}
+\]
+Thus, the large-length-scale limit of the noise-free Laplacian-GP posterior mean
+is ordinary linear interpolation.\\
+\\
+In $d$ dimensions, the separable kernel is 
+\begin{equation}
+k_{\boldsymbol{L}}
+(\boldsymbol{x},\boldsymbol{x}')
+=
+\prod_{k=1}^{d}
+\exp\!\left(
+-\frac{|x_k-x_k'|}{L_k}
+\right)
+\end{equation}
+On a Cartesian product grid, the covariance structure factorizes across
+coordinates, and the corresponding large-length-scale limit yields multilinear
+interpolation.\\
+\\
+The strict limit $L_k\rightarrow\infty$ produces a degenerate constant
+covariance kernel. The relevant statement is therefore a limit of posterior
+means for finite length scales rather than a Gaussian process defined directly
+at $L_k=\infty$. In the original STN-GPR experiments, marginal-likelihood
+optimization drove the length scales toward large values, motivating
+multilinear interpolation as the operational STN predictor.\\
+\\
+An exact Gaussian Process Regression model is also considered as an independent
+benchmark for off-grid prediction. It provides a useful reference against which
+the interpolation accuracy of the TT approximation can be assessed, but it is
+not incorporated into the proposed reconstruction procedure.\\
+\\
+Multilinear interpolation is continuous but not generally continuously
+differentiable across cell boundaries. In particular, its pure second
+derivatives vanish within each cell and are not classically defined at cell
+interfaces. It may therefore provide accurate price estimates while remaining
+unsuitable for the direct computation of Gamma and other higher-order local
+sensitivities.
+\subsection{Conditions for Efficient Reconstruction}
+\label{subsec:reconstruction-conditions}
+The preceding construction separates nodal reconstruction from off-grid
+interpolation. Its efficiency first requires the nodal pricing tensor to admit
+a sufficiently accurate QTT representation with moderate ranks. For a
+prescribed tolerance \(\varepsilon_{\mathrm{TT}}>0\), we assume that there
+exists a tensor
+\(\mathcal{A}_{\boldsymbol{r}}\in\operatorname{TT}(\boldsymbol{r})\) such that
+\begin{equation}
+\frac{
+\left\|
+\mathcal{A}-\mathcal{A}_{\boldsymbol{r}}
+\right\|_F
+}{
+\left\|\mathcal{A}\right\|_F
+}
+\leq
+\varepsilon_{\mathrm{TT}}
+\end{equation}
+where \(\operatorname{TT}(\boldsymbol{r})\) denotes the set of tensors whose TT
+ranks do not exceed
+\(\boldsymbol{r}=(r_0,\ldots,r_L)\). The required ranks depend on the coordinate
+system, the physical grid mapping, and the ordering of the quantized modes.
+Smoothness of the underlying pricing function alone does not guarantee a
+low-rank QTT representation.\\
+\\
+Efficient reconstruction also requires stable interpolation pivots. Let \(P_k\)
+denote the square pivot matrix selected from the \(k\)-th unfolding during the
+cross procedure. Its conditioning is measured by
+\begin{equation}
+\kappa_2(P_k)
+=
+\left\|P_k\right\|_2
+\left\|P_k^{-1}\right\|_2,
+\qquad
+k=1,\ldots,L-1
+\end{equation}
+Near-singular pivot matrices can amplify pricing, rounding, and truncation
+errors even when the tensor is approximately low-rank. The \emph{maxvol}
+selection reduces this risk but does not provide an unconditional global error
+bound. \\
+\\
+Finally, the pricing oracle must assign a consistent value to each grid index.
+This condition is immediate for deterministic pricing methods. For a
+simulation-based oracle, the random numbers are held fixed throughout the
+reconstruction, so that repeated evaluations define the same realization
+\begin{equation}
+\widetilde{\mathcal{A}}_{\mathrm{CRN}}(\boldsymbol{i})
+=
+\mathcal{A}(\boldsymbol{i})
++
+\eta_{\mathrm{CRN}}(\boldsymbol{i})
+\end{equation}
+Independent simulations are subsequently used to assess accuracy with respect
+to the underlying option value rather than to this fixed noisy realization.\\
+\\
+Under these conditions, increasing the TT-cross evaluation budget can improve
+the approximation of the nodal tensor. It cannot eliminate errors inherited
+from the pricing oracle or errors introduced when interpolating between grid
+nodes. The latter depend on how well the chosen coordinates and physical grid
+resolve the geometry of the pricing surface, which motivates the transformations
+introduced in the following section.
+\subsection{Limitations of Absolute-Strike Uniform Grids}
+\label{subsec:absolute-strike-limitations}
+Many option-pricing problems exhibit positive homogeneity with respect to the
+underlying asset levels and the strike. Let
+\begin{equation}
+\boldsymbol{S} = (S_1,\ldots,S_{d_S})
+\end{equation}
+denote the underlying asset vector, where $d_S$ is the number of assets, and
+let $\boldsymbol{\xi}$ collect the
+remaining model parameters. For a positively homogeneous payoff of degree one,
+the corresponding option value satisfies
+\begin{equation}
+V( \lambda S_1,\ldots,\lambda S_{d_S}, \lambda K, r,T,\boldsymbol{\xi} ) = \lambda V( S_1,\ldots,S_{d_S}, K,r,T,\boldsymbol{\xi} ), \qquad \lambda>0
+\label{eq:homogeneity-preview}
+\end{equation}
+This property holds for both European expectations and American Snell envelopes,
+since conditional expectation and maximization preserve positive homogeneity. \\
+\\
+Let $B(\boldsymbol{S})$ denote a positively homogeneous reference scale for the
+underlying state, such as the spot level in the single-asset case or an
+appropriate basket value in the multi-asset case. A natural dimensionless strike
+coordinate is the log-moneyness
+\begin{equation}
+m = \log\!\left( \frac{K}{B(\boldsymbol{S})} \right)
+\label{eq:basket-log-moneyness}
+\end{equation}
+The at-the-money region $K = B(\boldsymbol{S})$ is therefore mapped to the fixed coordinate \begin{equation}
+m=0
+\label{eq:atm-hyperplane}
+\end{equation}
+This distinction has direct consequences for grid resolution. On a uniform
+strike grid with spacing $\Delta K$, the corresponding local log-moneyness
+spacing near the money satisfies
+\begin{equation}
+\Delta m = \log\!\left( 1+\frac{\Delta K}{B(\boldsymbol{S})} \right) \approx \frac{\Delta K}{B(\boldsymbol{S})}
+\end{equation}
+Hence, the effective relative resolution varies with the basket level. A single
+absolute-strike spacing cannot provide comparable moneyness resolution across
+all spot configurations.\\
+\\
+Positive homogeneity also makes the scale dependence of strike curvature
+explicit. Writing
+\begin{equation}
+V(\boldsymbol{S},K,\ldots) = B(\boldsymbol{S})\,v(m,\ldots)
+\label{eq:normalized-price-preview}
+\end{equation}
+gives the chain-rule identities
+\begin{equation}
+\frac{\partial V}{\partial K}
+=
+e^{-m}\frac{\partial v}{\partial m}
+\qquad
+\frac{\partial^2V}{\partial K^2}
+=
+\frac{e^{-2m}}{B(\boldsymbol{S})}
+\left(
+\frac{\partial^2v}{\partial m^2}
+-
+\frac{\partial v}{\partial m}
+\right)
+\label{eq:normalized-strike-derivatives}
+\end{equation}
+Combined with the interpolation estimate established in
+Section~\ref{subsec:off-grid-interpolation},
+this relation shows that uniform absolute-strike spacing leads to
+scale-dependent interpolation accuracy. The effect is particularly relevant
+near the at-the-money region, where option convexity is typically concentrated. \\
+\\
+This also clarifies the role of the TT-cross sampling budget. The error
+decomposition introduced above separates the grid interpolation error from the
+nodal reconstruction error. Increasing the TT-cross budget acts only on the
+latter. Once the reconstruction error becomes smaller than the interpolation
+floor imposed by the physical grid, additional tensor evaluations or larger
+ranks cannot compensate for an insufficiently resolved strike discretization. \\
+\\
+Absolute-strike coordinates may also be unfavorable for tensor compression. The
+at-the-money ridge $K$
+moves jointly with the spot coordinates and is generally oblique to the tensor
+axes. Tensor unfoldings may consequently exhibit stronger apparent coupling
+between the strike dimension and the underlying assets, potentially increasing
+the required TT or QTT ranks. \\
+\\
+The log-moneyness transformation instead maps this ridge to
+\eqref{eq:atm-hyperplane}
+and separates the overall price scale from the relative strike position. This
+does not guarantee low ranks, but it aligns the tensor coordinates more closely
+with the financial geometry of the pricing function.\\
+\\
+For American options, the same issue is compounded by the early-exercise
+frontier. The continuation and exercise regions meet along a state-dependent
+surface and introduce localized changes in regularity. A coarse
+absolute-strike grid may undersample this transition, while LSMC noise may
+obscure it further. TT-cross may then either smooth over the transition or
+increase its ranks in an attempt to reproduce noisy local variations.\\
+\\
+These limitations are not intrinsic to QTT. As established above, binary
+tensorization constrains the index structure but does not require uniform
+physical spacing. The same QTT architecture can therefore be combined with
+nonlinear coordinate mappings and non-uniform grids. The limitations identified
+here arise instead from the use of absolute-strike coordinates together with
+uniform physical nodes. This motivates the homogeneity-based transformation and
+convexity-guided grid constructions developed in the following sections.
+\section{Homogeneity-Based Transformation and Log-Moneyness Coordinates}
+\label{sec:homogeneity-transformation}
+Section~\ref{subsec:absolute-strike-limitations} introduced basket
+log-moneyness and identified the scale dependence created by an absolute-strike
+grid. The present section provides the mathematical justification for that
+change of coordinates. The argument has three steps. First, basket-option
+prices inherit the homogeneity of the underlying dynamics and payoff. Second,
+this homogeneity separates the common monetary scale from basket composition
+and moneyness. Third, removing the resulting state-dependent translations can
+improve the ranks of the discretized pricing tensor. The TT, QTT and
+interpolation constructions themselves remain those of
+Sections~\ref{subsec:tt-qtt}--\ref{subsec:off-grid-interpolation}.
+\subsection{Homogeneity of Basket-Option Prices}
+\label{subsec:price-homogeneity}
+Let \(d_S\) denote the number of underlying assets and assume that their
+risk-neutral dynamics satisfy the pathwise scaling property
+\begin{equation}
+\boldsymbol{S}_u^{t,\lambda\boldsymbol{s}}
+=
+\lambda\boldsymbol{S}_u^{t,\boldsymbol{s}}
+\qquad
+\lambda>0
+\qquad
+\mathbb{Q}\text{-a.s.}
+\label{eq:pathwise-scaling}
+\end{equation}
+Correlated geometric Brownian motions satisfy
+\eqref{eq:pathwise-scaling} \cite{black1973pricing,merton1973rational}, but the
+argument below does not otherwise depend on lognormality. Let
+\(B:(0,\infty)^{d_S}\to(0,\infty)\) be positively homogeneous of degree one and
+define
+\begin{equation}
+\Phi_\eta(\boldsymbol{s},K)
+=
+\left[
+\eta\left(B(\boldsymbol{s})-K\right)
+\right]^+,
+\qquad
+\eta\in\{-1,1\}
+\label{eq:basket-payoff}
+\end{equation}
+Weighted arithmetic baskets and weighted geometric baskets with weights
+summing to one both satisfy the required homogeneity.
+
+\begin{proposition}[Price homogeneity]
+For both European and American exercise,
+\begin{equation}
+V
+\left(
+t,\lambda\boldsymbol{s},\lambda K,\boldsymbol{\vartheta}
+\right)
+=
+\lambda
+V
+\left(
+t,\boldsymbol{s},K,\boldsymbol{\vartheta}
+\right)
+\label{eq:price-homogeneity}
+\end{equation}
+for every \(\lambda>0\), provided that
+\(\boldsymbol{\vartheta}\) contains only scale-free parameters.
+\end{proposition}
+
+\begin{proof}
+Let \(\mathfrak{T}_{t,T}=\{T\}\) for a European option and let
+\(\mathfrak{T}_{t,T}\) be the admissible stopping times for an American option
+\cite{jaillet1990variational}.
+Both prices can be written as
+\begin{equation}
+V(t,\boldsymbol{s},K,\boldsymbol{\vartheta})
+=
+\sup_{\tau\in\mathfrak{T}_{t,T}}
+\mathbb{E}^{\mathbb{Q}}
+\left[
+e^{-r(\tau-t)}
+\Phi_\eta
+\left(
+\boldsymbol{S}_\tau^{t,\boldsymbol{s}},K
+\right)
+\right]
+\end{equation}
+By \eqref{eq:pathwise-scaling} and the degree-one homogeneity of
+\(\Phi_\eta\), the discounted payoff is multiplied by \(\lambda\) for every
+admissible \(\tau\). Since \(\lambda>0\), expectation and supremum preserve this
+factor, which proves \eqref{eq:price-homogeneity}.
+\end{proof}
+
+The same property is retained by the LSMC estimator used in the experiments
+\cite{longstaff2001leastSquares,glasserman2004montecarlo}
+when its regression state and basis functions are dimensionless and common
+random numbers are used across scaled states. Conditional on the simulated
+paths, exercise decisions are unchanged whereas cash flows are multiplied by
+\(\lambda\). Remaining deviations from homogeneity are then numerical rather
+than structural.
+
+\subsection{Reduction to Relative Coordinates}
+\label{subsec:relative-coordinates}
+Equation~\eqref{eq:price-homogeneity} shows that the common monetary scale is a
+redundant degree of freedom. Using the basket value as numeraire, define the
+normalized composition
+\begin{equation}
+\overline{\boldsymbol{s}}
+=
+\frac{\boldsymbol{s}}{B(\boldsymbol{s})}
+\label{eq:normalized-composition}
+\end{equation}
+which belongs to the cross-section
+\begin{equation}
+\mathcal{M}_B
+=
+\left\{
+\boldsymbol{z}\in(0,\infty)^{d_S}
+:
+B(\boldsymbol{z})=1
+\right\}
+\label{eq:basket-cross-section}
+\end{equation}
+Under the regularity condition
+\(\nabla B(\boldsymbol{z})\neq\boldsymbol{0}\),
+this cross-section has dimension \(d_S-1\).\\
+\\
+We retain the log-moneyness \(m\) introduced in
+\eqref{eq:basket-log-moneyness} and define a single normalized pricing
+function
+\begin{equation}
+v
+\left(
+t,\overline{\boldsymbol{s}},m,\boldsymbol{\vartheta}
+\right)
+=
+V
+\left(
+t,\overline{\boldsymbol{s}},e^m,\boldsymbol{\vartheta}
+\right)
+\label{eq:normalized-pricing-function}
+\end{equation}
+
+\begin{proposition}[Exact scale separation]
+The original price admits the factorization
+\begin{equation}
+V
+\left(
+t,\boldsymbol{s},K,\boldsymbol{\vartheta}
+\right)
+=
+B(\boldsymbol{s})
+v
+\left(
+t,\overline{\boldsymbol{s}},m,\boldsymbol{\vartheta}
+\right)
+\label{eq:exact-scale-separation}
+\end{equation}
+\end{proposition}
+
+This follows immediately from \eqref{eq:price-homogeneity} with
+\(\lambda=B(\boldsymbol{s})^{-1}\) and
+\(K/B(\boldsymbol{s})=e^m\).\\
+\\
+The factorization reduces the intrinsic dimension of
+\((\boldsymbol{s},K)\) by one: the normalized composition contributes
+\(d_S-1\) degrees of freedom and \(m\) contributes one. Basket composition
+cannot generally be removed, because two normalized spot vectors with the same
+basket value may induce different future basket distributions. It disappears
+only in special cases, such as a geometric basket under lognormal dynamics
+with fixed scale-free parameters.\\
+\\
+Relative to the original STN-GPR parameterization
+\cite{Gribben2026STNGPR}, the numerical construction used in this work adopts
+a less restrictive transformation than the complete quotient reduction. It
+retains the absolute spot coordinates and replaces only the strike by
+log-moneyness. Accordingly, the transformed surface reconstructed by the
+surrogate is
+\begin{equation}
+\widetilde{V}
+\left(
+t,\boldsymbol{s},m,\boldsymbol{\vartheta}
+\right)
+=
+V
+\left(
+t,\boldsymbol{s},B(\boldsymbol{s})e^m,\boldsymbol{\vartheta}
+\right)
+=
+B(\boldsymbol{s})
+v
+\left(
+t,\overline{\boldsymbol{s}},m,\boldsymbol{\vartheta}
+\right)
+\label{eq:transformed-pricing-surface}
+\end{equation}
+Thus, the exact quotient representation explains the financial structure,
+whereas \(\widetilde V\) is the object actually sampled by TT-cross
+\cite{oseledets2010ttcross}. This practical choice does not reduce the nominal
+tensor order; it removes the redundant spot-dependent displacement of the
+strike profile.
+\subsection{Consequences of the Log-Moneyness Transformation}
+\label{subsec:log-moneyness-consequences}
+The coordinate and its at-the-money interpretation have already been
+established in Section~\ref{subsec:absolute-strike-limitations}. Only the
+consequences required by the numerical method are recorded here.\\
+\\
+For a log-moneyness grid
+\(m_0<\cdots<m_{n_m-1}\), its strike nodes at a fixed spot state are
+\begin{equation}
+K_j(\boldsymbol{s})
+=
+B(\boldsymbol{s})e^{m_j}
+\end{equation}
+Hence,
+\begin{equation}
+\frac{
+K_{j+1}(\boldsymbol{s})-K_j(\boldsymbol{s})
+}{
+K_j(\boldsymbol{s})
+}
+=
+e^{m_{j+1}-m_j}-1
+\label{eq:relative-strike-spacing}
+\end{equation}
+which is independent of the basket level. Equation
+\eqref{eq:relative-strike-spacing} follows immediately by cancellation of
+\(B(\boldsymbol{s})\); a separate proof is unnecessary.\\
+\\
+The strike-derivative identities are those already derived in
+\eqref{eq:normalized-strike-derivatives}. One additional chain-rule correction
+is needed when market Delta is computed while holding the absolute strike
+fixed:
+\begin{equation}
+\left.
+\frac{\partial V}{\partial s_i}
+\right|_K
+=
+\left.
+\frac{\partial\widetilde{V}}{\partial s_i}
+\right|_m
+-
+\frac{
+\partial_{s_i}B(\boldsymbol{s})
+}{
+B(\boldsymbol{s})
+}
+\frac{\partial\widetilde{V}}{\partial m}
+\label{eq:market-delta-correction}
+\end{equation}
+This distinction becomes important when Greeks are extracted from a surrogate
+trained in transformed coordinates.\\
+\\
+Likewise, the interpolation estimate of
+Section~\ref{subsec:off-grid-interpolation} applies directly with the local
+spacing \(h_j=m_{j+1}-m_j\). If the transformed price is twice continuously differentiable with respect to $m$ on this interval, linear interpolation satisfies
+\[
+\left|
+\widetilde{V}
+-
+\mathcal{I}_m\widetilde{V}
+\right|
+\leq
+\frac{h_j^2}{8}
+\sup_{\xi\in[m_j,m_{j+1}]}
+\left|
+\frac{\partial^2\widetilde{V}}{\partial m^2}(\xi)
+\right|
+\]
+Using $\widetilde{V}=B(\boldsymbol{s})u$ gives the scale-free estimate
+\[
+\frac{
+\left|
+\widetilde{V}
+-
+\mathcal{I}_m\widetilde{V}
+\right|
+}{
+B(\boldsymbol{s})
+}
+\leq
+\frac{h_j^2}{8}
+\sup_{\xi\in[m_j,m_{j+1}]}
+\left|
+\frac{\partial^2u}{\partial m^2}(\xi)
+\right|
+\]
+The normalized interpolation error is thus controlled by the log-moneyness spacing and the curvature of a dimensionless pricing function, rather than by an absolute strike increment.\\
+\\
+If the original market domain uses
+\(K\in[K_{\min},K_{\max}]\) and
+\(\boldsymbol{s}\in\mathcal{S}\), complete coverage is obtained from the
+rectangular envelope
+\begin{equation}
+m_{\min}
+=
+\log\left(
+\frac{K_{\min}}{B_{\max}}
+\right),
+\qquad
+m_{\max}
+=
+\log\left(
+\frac{K_{\max}}{B_{\min}}
+\right)
+\label{eq:moneyness-domain}
+\end{equation}
+where
+\[
+B_{\min}
+=
+\min_{\boldsymbol{s}\in\mathcal{S}}B(\boldsymbol{s}),
+\qquad
+B_{\max}
+=
+\max_{\boldsymbol{s}\in\mathcal{S}}B(\boldsymbol{s})
+\]
+This envelope may contain inverse images outside the original strike interval
+for some spot states, but it contains the image of every state in the original
+domain.\\
+\\
+Finally, QTT compatibility requires only the power-of-two cardinality of the
+index set, as established in Section~\ref{subsec:tt-qtt}; it does not require
+uniform physical spacing \cite{khoromskij2011qtt,oseledets2011waveletQTT}. No
+binary modes or tensorization rules are therefore redefined here. The nonlinear
+allocation of the \(m\)-nodes is developed in Section~4.
+\subsection{Impact on Tensor Compressibility}
+\label{subsec:compressibility-impact}
+The exact TT ranks and their unfolding interpretation were defined in
+\eqref{eq:tt-unfolding-rank} \cite{oseledets2011tensorTrain}. For a tolerance
+\(\varepsilon>0\), we use the corresponding numerical rank
+\begin{equation}
+r_k^{(\varepsilon)}
+=
+\min
+\left\{
+r:
+\sum_{j>r}
+\left(
+\sigma_j^{(k)}
+\right)^2
+\leq
+\varepsilon^2
+\left\|
+\mathcal{A}^{\langle k\rangle}
+\right\|_F^2
+\right\}
+\label{eq:numerical-tt-rank}
+\end{equation}
+where \(\sigma_j^{(k)}\) are the singular values of the \(k\)-th unfolding.
+This extends the exact notion from Section~\ref{subsec:tt-qtt} without
+redefining the tensor or its matricizations.\\
+\\
+To isolate the effect of the coordinate choice, first suppose that basket
+composition and all other scale-free parameters are fixed, so that the
+normalized price is a univariate profile \(f(m)\). For spot states
+\(\boldsymbol{s}^{(i)}\), set
+\(b_i=B(\boldsymbol{s}^{(i)})\). On a common moneyness grid,
+\begin{equation}
+A_{ij}^{\mathrm{rel}}
+=
+b_i f(m_j)
+\label{eq:relative-rank-one-matrix}
+\end{equation}
+This matrix is the outer product of
+\((b_i)_i\) and \((f(m_j))_j\), so its rank is one whenever the price is not
+identically zero. This observation is immediate from
+\eqref{eq:relative-rank-one-matrix} and requires no separate proof. \\
+\\
+On an absolute log-strike grid, let
+\(\kappa_j=\log K_j\), \(\beta_i=\log b_i\),
+\(\delta_i=\beta_i-\beta_0\), and
+\(\overline m_j=\kappa_j-\beta_0\). The corresponding matrix is
+\begin{equation}
+A_{ij}^{\mathrm{abs}}
+=
+b_i f(\overline m_j-\delta_i)
+\label{eq:absolute-translated-matrix}
+\end{equation}
+Its rows are translated copies of the same profile. A Taylor expansion gives
+\begin{equation}
+A_{ij}^{\mathrm{abs}}
+=
+\sum_{p=0}^{P}
+\left[
+b_i\frac{(-\delta_i)^p}{p!}
+\right]
+f^{(p)}(\overline m_j)
++
+b_iR_{P+1}(i,j)
+\label{eq:translation-separation}
+\end{equation}
+The truncated sum has rank at most \(P+1\). If
+\(\lvert\delta_i\rvert\leq D\) and
+\(\sup_{\mathcal{I}_D}\lvert f^{(P+1)}\rvert\leq M_{P+1}\), Taylor's theorem
+yields
+\begin{equation}
+\left\|
+A^{\mathrm{abs}}
+-
+A_P^{\mathrm{abs}}
+\right\|_F
+\leq
+b_{\max}\sqrt{n_Sn_K}
+\frac{
+M_{P+1}D^{P+1}
+}{
+(P+1)!
+}
+\label{eq:absolute-rank-bound}
+\end{equation}
+The basket-scale range \(D\) and the derivatives of the moneyness profile
+therefore control the additional separation rank required in absolute
+coordinates. The relative transformation removes this translation parameter
+exactly.\\
+\\
+For the general normalized surface in
+\eqref{eq:exact-scale-separation}, suppose that
+\begin{equation}
+v
+\left(
+\overline{\boldsymbol{s}},m,\boldsymbol{\vartheta}
+\right)
+\approx
+\sum_{\ell=1}^{R}
+a_\ell
+\left(
+\overline{\boldsymbol{s}}
+\right)
+b_\ell
+\left(
+m,\boldsymbol{\vartheta}
+\right)
+\label{eq:separated-normalized-surface}
+\end{equation}
+at tolerance \(\varepsilon\). After discretization, each term is an outer
+product across the unfolding that separates the spot modes from the remaining
+modes. Row scaling by \(B(\boldsymbol{s})\) does not increase its rank.
+Consequently, the corresponding numerical rank is at most \(R\). This is a
+direct consequence of \eqref{eq:separated-normalized-surface}, so an additional
+formal proof would add no information.\\
+\\
+No universal inequality between QTT ranks in the absolute and relative
+coordinates follows. The transformation removes one
+identified source of rank growth, but the remaining ranks still depend on
+basket composition, mode ordering, heterogeneous dynamics, early exercise and
+pricing-oracle noise. Their effect on storage and TT-cross cost follows from
+the complexity relations already established in
+Sections~\ref{subsec:tt-qtt} and~\ref{subsec:tt-cross}. The claim is therefore
+tested empirically at fixed tensor shape, evaluation budget and reconstruction
+tolerance. Section~4 now complements this algebraic reorganization by placing
+more physical nodes where the normalized moneyness surface is most difficult
+to interpolate.
+
+\section{Convexity-guided adaptive QTT grids}
+\subsection{Convexity around the At-the-Money Region}
+Section~\ref{subsec:absolute-strike-limitations} and section~\ref{subsec:relative-coordinates} established the financial role of log-moneyness and the associated separation between monetary scale and relative option geometry. We now identify the region in which a fixed number of QTT nodes should provide the highest physical resolution. Let the basket function be either the weighted arithmetic average
+\begin{equation}
+B_{\mathrm{A}}(\boldsymbol{s})
+=
+\sum_{i=1}^{d_S} w_i s_i
+\end{equation}
+or the weighted geometric average
+\begin{equation}
+B_{\mathrm{G}}(\boldsymbol{s})
+=
+\prod_{i=1}^{d_S} s_i^{w_i}
+\end{equation}
+where \(w_i>0\) and
+\begin{equation}
+\sum_{i=1}^{d_S}w_i=1
+\end{equation}
+Both basket functions are positively homogeneous:
+\begin{equation}
+B_{\mathrm{A}}(\lambda\boldsymbol{s})
+=
+\lambda B_{\mathrm{A}}(\boldsymbol{s})
+\qquad
+B_{\mathrm{G}}(\lambda\boldsymbol{s})
+=
+\lambda B_{\mathrm{G}}(\boldsymbol{s})
+\end{equation}
+for every \(\lambda>0\).
+\begin{proposition}[Strike convexity for arithmetic and geometric basket puts]
+Let \(B\) denote either \(B_{\mathrm{A}}\) or \(B_{\mathrm{G}}\). The European and American basket-put prices
+\begin{equation}
+V_B^{\mathrm{E}}(t,\boldsymbol{s},K)
+=
+\mathbb{E}_t
+\left[
+e^{-r(T-t)}
+\left(
+K-B(\boldsymbol{S}_T)
+\right)^+
+\right]
+\end{equation}
+and
+\begin{equation}
+V_B^{\mathrm{A}}(t,\boldsymbol{s},K)
+=
+\sup_{\tau\in\mathcal{T}_{t,T}}
+\mathbb{E}_t
+\left[
+e^{-r(\tau-t)}
+\left(
+K-B(\boldsymbol{S}_\tau)
+\right)^+
+\right]
+\end{equation}
+are convex functions of \(K\).
+\end{proposition}
+
+\begin{proof}
+For every fixed basket value \(x\geq 0\), the function
+\begin{equation}
+K
+\longmapsto
+(K-x)^+
+=
+\max\{0,K-x\}
+\end{equation}
+is the pointwise maximum of two affine functions and is therefore convex. Multiplication by a positive discount factor and conditional expectation preserve convexity. This proves the result for the European price and for the discounted expected payoff associated with every fixed stopping time \(\tau\). \\
+\\
+The American price is the pointwise supremum over all admissible stopping times of these convex functions. Since a pointwise supremum of convex functions is convex, the result also holds for the American price.
+\end{proof}
+Consequently, both arithmetic and geometric basket-put prices satisfy
+\begin{equation}
+\frac{\partial^2 V_B^{\mathrm{E}}}{\partial K^2}
+\geq 0
+\qquad
+\frac{\partial^2 V_B^{\mathrm{A}}}{\partial K^2}
+\geq 0
+\end{equation}
+in the classical sense wherever the derivatives exist and in the distributional sense otherwise.
+For the European option, the convexity admits a direct probabilistic interpretation. Let \(F_{B,T}(\,\cdot\mid\boldsymbol{s})\) denote the conditional distribution function of \(B(\boldsymbol{S}_T)\). Then
+\begin{equation}
+\frac{\partial V_B^{\mathrm{E}}}{\partial K}
+=
+e^{-r(T-t)}
+F_{B,T}(K\mid\boldsymbol{s})
+\end{equation}
+If the conditional law admits a density \(f_{B,T}(\,\cdot\mid\boldsymbol{s})\), it follows that
+\begin{equation}
+\frac{\partial^2 V_B^{\mathrm{E}}}{\partial K^2}
+=
+e^{-r(T-t)}
+f_{B,T}(K\mid\boldsymbol{s})
+\geq 0
+\end{equation}
+This identity applies in particular to the arithmetic basket, even though the distribution of a weighted sum of correlated lognormal variables does not generally admit a closed-form expression. \\
+\\
+The homogeneity result established in Section 3.1 further implies
+\begin{equation}
+\frac{\partial^2 V_B}{\partial K^2}
+(t,\lambda\boldsymbol{s},\lambda K,\boldsymbol{\vartheta})
+=
+\frac{1}{\lambda}
+\frac{\partial^2 V_B}{\partial K^2}
+(t,\boldsymbol{s},K,\boldsymbol{\vartheta})
+\end{equation}
+The magnitude of the strike curvature therefore depends on the monetary scale. To remove this dependence, set
+\begin{equation}
+B_0=B(\boldsymbol{s})
+\qquad
+K=B_0e^m
+\end{equation}
+
+\begin{definition}[Dimensionless strike convexity]
+The dimensionless strike-convexity indicator is defined by
+\begin{equation}
+\chi_B(\boldsymbol{s},m,T,\boldsymbol{\vartheta})
+=
+\frac{K^2}{B_0}
+\frac{\partial^2V_B}{\partial K^2}
+(\boldsymbol{s},K,T,\boldsymbol{\vartheta})
+\end{equation}
+\end{definition}
+The scaling identity gives
+\begin{equation}
+\chi_B
+(
+\lambda\boldsymbol{s},m,T,\boldsymbol{\vartheta}
+)
+=
+\chi_B
+(
+\boldsymbol{s},m,T,\boldsymbol{\vartheta}
+)
+\end{equation}
+Moreover, if
+\begin{equation}
+V_B(\boldsymbol{s},K,T,\boldsymbol{\vartheta})
+=
+B_0
+v_B(m,T,\boldsymbol{\vartheta})
+\end{equation}
+then
+\begin{equation}
+\chi_B
+=
+\frac{\partial^2v_B}{\partial m^2}
+-
+\frac{\partial v_B}{\partial m}
+\end{equation}
+The indicator therefore removes both the arbitrary monetary scale and the first-order contribution generated by the exponential transformation \(K=B_0e^m\).
+\paragraph{Short-maturity behaviour of the arithmetic basket}
+Consider the arithmetic basket
+\begin{equation}
+B_{\mathrm{A},0}
+=
+\sum_{i=1}^{d_S}w_is_i
+\end{equation}
+and define the state-dependent normalized basket weights
+\begin{equation}
+\alpha_i(\boldsymbol{s})
+=
+\frac{w_is_i}{B_{\mathrm{A},0}}
+\end{equation}
+Under correlated geometric Brownian dynamics, let
+\begin{equation}
+\Sigma_{ij}
+=
+\sigma_i\sigma_j\rho_{ij}
+\end{equation}
+The instantaneous effective variance of the normalized arithmetic basket is
+\begin{equation}
+\sigma_{\mathrm{A}}^2(\boldsymbol{s})
+=
+\boldsymbol{\alpha}(\boldsymbol{s})^{\mathsf T}
+\Sigma
+\boldsymbol{\alpha}(\boldsymbol{s})
+\end{equation}
+Its instantaneous drift is
+\begin{equation}
+\mu_{\mathrm{A}}(\boldsymbol{s})
+=
+\sum_{i=1}^{d_S}
+\alpha_i(\boldsymbol{s})(r-q_i)
+\end{equation}
+For a short remaining maturity \(T\), a first-order stochastic expansion gives
+\begin{equation}
+\frac{
+B_{\mathrm{A}}(\boldsymbol{S}_T)-B_{\mathrm{A},0}
+}{
+B_{\mathrm{A},0}
+}
+=
+\mu_{\mathrm{A}}(\boldsymbol{s})T
++
+\sigma_{\mathrm{A}}(\boldsymbol{s})\sqrt{T}\,Z
++
+o_{\mathbb{P}}(\sqrt{T})
+\end{equation}
+where \(Z\sim\mathcal{N}(0,1)\). The transition of the put payoff is therefore smoothed over a log-moneyness region whose characteristic width is
+\begin{equation}
+O
+\left(
+\sigma_{\mathrm{A}}(\boldsymbol{s})\sqrt{T}
+\right)
+\end{equation}
+The centre of this region satisfies
+\begin{equation}
+m_{\mathrm{A}}^\star(T)
+=
+O(T)
+\end{equation}
+while the maximum dimensionless convexity is of order
+\begin{equation}
+\chi_{\mathrm{A}}
+\left(
+m_{\mathrm{A}}^\star(T),T
+\right)
+=
+O
+\left(
+\frac{1}{
+\sigma_{\mathrm{A}}(\boldsymbol{s})\sqrt{T}
+}
+\right)
+\end{equation}
+Thus, the arithmetic-basket convexity concentrates around \(m=0\) and becomes increasingly localized as maturity approaches zero. This is the relevant behaviour for the arithmetic-basket American option considered in the numerical experiments.
+\paragraph{Analytical geometric-basket benchmark}
+Unlike the arithmetic basket, the geometric basket is lognormal under correlated geometric Brownian dynamics. It therefore provides an analytical benchmark through which the location and width of the convexity region can be computed exactly.\\
+\\
+Let
+\begin{equation}
+\sigma_{\mathrm{G}}^2
+=
+\boldsymbol{w}^{\mathsf T}
+\Sigma
+\boldsymbol{w}
+\end{equation}
+and
+\begin{equation}
+\mu_{\mathrm{G}}
+=
+r
+-
+\boldsymbol{w}^{\mathsf T}\boldsymbol{q}
+-
+\frac{1}{2}
+\sum_{i=1}^{d_S}w_i\sigma_i^2
++
+\frac{1}{2}\sigma_{\mathrm{G}}^2
+\end{equation}
+The terminal geometric basket satisfies
+\begin{equation}
+B_{\mathrm{G}}(\boldsymbol{S}_T)
+=
+B_{\mathrm{G},0}
+\exp
+\left[
+\left(
+\mu_{\mathrm{G}}
+-
+\frac{1}{2}\sigma_{\mathrm{G}}^2
+\right)T
++
+\sigma_{\mathrm{G}}\sqrt{T}\,Z
+\right]
+\end{equation}
+where \(Z\sim\mathcal{N}(0,1)\). The normalized European put price is
+\begin{equation}
+v_{\mathrm{G}}^{\mathrm{P}}(m,T)
+=
+e^{m-rT}\Phi(-d_2)
+-
+e^{(\mu_{\mathrm{G}}-r)T}\Phi(-d_1)
+\end{equation}
+
+with
+
+\begin{equation}
+d_1
+=
+\frac{
+-m+
+\left(
+\mu_{\mathrm{G}}
++
+\frac{1}{2}\sigma_{\mathrm{G}}^2
+\right)T
+}{
+\sigma_{\mathrm{G}}\sqrt{T}
+}
+\qquad
+d_2
+=
+d_1-\sigma_{\mathrm{G}}\sqrt{T}
+\end{equation}
+Differentiation with respect to the strike gives
+\begin{equation}
+\frac{\partial^2V_{\mathrm{G}}^{\mathrm{E}}}{\partial K^2}
+=
+\frac{
+e^{-rT}\varphi(d_2)
+}{
+K\sigma_{\mathrm{G}}\sqrt{T}
+}
+\end{equation}
+and therefore
+\begin{equation}
+\chi_{\mathrm{G}}(m,T)
+=
+\frac{
+e^{m-rT}\varphi(d_2)
+}{
+\sigma_{\mathrm{G}}\sqrt{T}
+}
+\end{equation}
+
+\begin{lemma}[Location of the geometric-basket convexity ridge]
+For every \(T>0\), the function
+\begin{equation}
+m
+\longmapsto
+\chi_{\mathrm{G}}(m,T)
+\end{equation}
+has a unique maximum at
+\begin{equation}
+m_{\mathrm{G}}^\star(T)
+=
+\left(
+\mu_{\mathrm{G}}
++
+\frac{1}{2}\sigma_{\mathrm{G}}^2
+\right)T
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Direct differentiation gives
+\begin{equation}
+\frac{\partial}{\partial m}
+\log\chi_{\mathrm{G}}
+=
+1+
+\frac{d_2}{
+\sigma_{\mathrm{G}}\sqrt{T}
+}
+\end{equation}
+and
+\begin{equation}
+\frac{\partial^2}{\partial m^2}
+\log\chi_{\mathrm{G}}
+=
+-
+\frac{1}{
+\sigma_{\mathrm{G}}^2T
+}
+<0
+\end{equation}
+The first-order condition gives
+\begin{equation}
+d_2
+=
+-\sigma_{\mathrm{G}}\sqrt{T}
+\end{equation}
+which is equivalent to the stated expression for \(m_{\mathrm{G}}^\star(T)\). Strict negativity of the second derivative proves uniqueness.
+\end{proof}
+As \(T\) approaches zero,
+\begin{equation}
+m_{\mathrm{G}}^\star(T)
+=
+O(T)
+\longrightarrow 0
+\end{equation}
+and
+\begin{equation}
+\chi_{\mathrm{G}}
+\left(
+m_{\mathrm{G}}^\star(T),T
+\right)
+\sim
+\frac{1}{
+\sigma_{\mathrm{G}}\sqrt{2\pi T}
+}
+\end{equation}
+The characteristic width of the ridge is
+\begin{equation}
+O
+\left(
+\sigma_{\mathrm{G}}\sqrt{T}
+\right)
+\end{equation}
+The arithmetic and geometric baskets therefore exhibit the same leading short-maturity geometry: the convexity is concentrated around the at-the-money region, its width decreases as \(O(\sqrt{T})\), and its magnitude increases as \(O(T^{-1/2})\). The geometric benchmark is used in Figure 1 because its convexity field and ridge location are available analytically, whereas the arithmetic-basket argument does not require a closed-form distribution.\\
+\\
+Figure~\ref{fig:convexity-grid-comparison} illustrates the region in which the fixed QTT resolution should be concentrated. The white markers are included only to preview the physical nodes associated with the uniform and transformed discretizations. Their placement is not defined by the present convexity analysis. The construction and quantitative justification of the moneyness nodes are given in Section 4.2, while the placement of the maturity nodes is introduced separately in Section 4.3.\\
+\\
+For the five-asset equal-weight geometric basket used in Figure 1,
+\begin{equation}
+d_S=5
+\qquad
+w_i=\frac{1}{5}
+\qquad
+\sigma_i=20\%
+\qquad
+\rho_{ij}=0.3
+\end{equation}
+and
+\begin{equation}
+q_i=0
+\qquad
+r=3\%
+\qquad
+\sigma_{\mathrm{G}}=0.132665
+\qquad
+\mu_{\mathrm{G}}=0.0188
+\end{equation}
+Both panels use \(64\) moneyness nodes and \(8\) maturity nodes. At this stage, the analytical field identifies the financially relevant region but does not prescribe the coordinate transformation used to place those nodes.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[
+        width=\textwidth
+    ]{figures/convexity-grid-comparison.png}
+    \caption{
+    Dimensionless strike convexity
+    \(
+    \chi_{\mathrm{G}}
+    =
+    (K^2/B_{\mathrm{G},0})V_{KK}
+    \)
+    for the European geometric-basket put. The cyan dashed curve is the analytical ridge
+    \(
+    m_{\mathrm{G}}^\star(T)
+    \).
+    The white circles preview the physical QTT nodes associated with the uniform and transformed grids. Their placement is not derived in the present subsection: the moneyness-node construction is introduced in Section 4.2 and the maturity-node construction in Section 4.3. The figure shows the short-maturity at-the-money region toward which the fixed physical resolution will be reallocated.
+    }
+    \label{fig:convexity-grid-comparison}
+\end{figure}
+The heat map provides a geometric interpretation of the adaptive construction. A uniform grid distributes its approximation capacity independently of the local structure of the pricing function. The convexity-guided grid instead preserves the same power-of-two cardinalities while moving physical nodes toward the region where the strike curvature is largest. The precise nonlinear mappings used to perform this redistribution are introduced in the following subsections.
+\subsection{Hyperbolic-sine moneyness discretization}
+Figure~\ref{fig:convexity-grid-comparison} identified the short-maturity at-the-money region as the region in which the pricing surface requires the highest physical resolution. We now define the placement of the moneyness nodes shown in that figure.\\
+\\
+The complete physical grid is a Cartesian product of the individual coordinate grids:
+\begin{equation}
+\mathcal{G}
+=
+\mathcal{G}_{S_1}
+\times\cdots\times
+\mathcal{G}_{S_{d_S}}
+\times
+\mathcal{G}_m
+\times
+\mathcal{G}_r
+\times
+\mathcal{G}_T
+\end{equation}
+and is therefore a separable metric space (see Appendix~\ref{app:separability-proof}). The componentwise grid maps preserve its Cartesian-product structure, so the discrete pricing array belongs naturally to the tensor-product space 
+\[
+\bigotimes_{k=1}^{d}\mathbb{R}^{n_k}
+\]
+For the five-asset experiments considered in this work, its shape is
+\begin{equation}
+32^5\times64\times8\times8
+\end{equation}
+The spot and interest-rate coordinates retain the uniform physical discretization of the baseline framework. The proposed adaptation modifies only the log-moneyness and maturity axes. The moneyness transformation is introduced in the present subsection, while the maturity transformation is defined in Section~\ref{subsec:short-maturity refinement}.\\
+\\
+The white markers in Figure~\ref{fig:convexity-grid-comparison} represent the two-dimensional projection
+\begin{equation}
+\mathcal{G}_m\times\mathcal{G}_T
+\end{equation}
+of this Cartesian grid. They show the physical nodes available to the tensor discretization and not the subset of multidimensional indices subsequently selected by TT-cross. The horizontal placement of the nodes is determined by the moneyness transformation defined below. Their vertical placement is explained separately in the next section.\\
+\\
+Now, let
+\begin{equation}
+m_{\min}<0<m_{\max}
+\end{equation}
+denote the prescribed bounds of the log-moneyness domain. We introduce the positive tail amplitudes
+\begin{equation}
+a_-=-m_{\min}
+\qquad
+a_+=m_{\max}
+\end{equation}
+and distinguish the physical coordinate \(m\) from a uniformly discretized computational coordinate
+\begin{equation}
+u\in[-1,1]
+\end{equation}
+The purpose of the coordinate map is to preserve the complete log-moneyness domain while allocating a larger fraction of the available physical resolution to a neighbourhood of \(m=0\). This is achieved without changing the number of QTT modes or their binary structure.
+\begin{definition}[Hyperbolic-sine moneyness map]
+For a concentration parameter \(\gamma>0\), define
+\[
+\phi_\gamma(u)
+=
+\begin{cases}
+\displaystyle
+a_-\frac{\sinh(\gamma u)}{\sinh(\gamma)},
+& -1\leq u\leq 0
+\\[1.2ex]
+\displaystyle
+a_+\frac{\sinh(\gamma u)}{\sinh(\gamma)},
+& 0\leq u\leq 1
+\end{cases}
+\]
+Given \(n_m=2^{L_m}\) computational nodes
+\[
+u_j=-1+\frac{2j}{n_m-1},
+\qquad
+j=0,\ldots,n_m-1
+\]
+the corresponding physical log-moneyness grid is
+\[
+m_j=\phi_\gamma(u_j)
+\]
+\end{definition}
+The two branches are scaled independently because the admissible log-moneyness interval need not be symmetric around zero. Nevertheless, both branches share the same concentration parameter and therefore apply the same relative deformation to the in-the-money and out-of-the-money regions.
+\begin{lemma}[Admissibility of the transformed grid]
+The map \(\phi_\gamma\) is continuous and strictly increasing on \([-1,1]\), with
+\[
+\phi_\gamma(-1)=m_{\min},
+\qquad
+\phi_\gamma(0)=0,
+\qquad
+\phi_\gamma(1)=m_{\max}
+\]
+Consequently, the sequence \((m_j)_{j=0}^{n_m-1}\) is strictly increasing and covers the entire prescribed domain.
+\end{lemma}
+
+\begin{proof}
+Continuity follows from the equality of the two branches at \(u=0\). Away from the origin,
+\[
+\phi_\gamma'(u)
+=
+\begin{cases}
+\displaystyle
+a_-\gamma\frac{\cosh(\gamma u)}{\sinh(\gamma)},
+& u<0
+\\[1.2ex]
+\displaystyle
+a_+\gamma\frac{\cosh(\gamma u)}{\sinh(\gamma)},
+& u>0
+\end{cases}
+\]
+which is strictly positive because \(a_->0\), \(a_+>0\), and \(\gamma>0\). The endpoint identities follow directly from the oddness of the hyperbolic sine.
+\end{proof}
+When \(a_-\neq a_+\), the one-sided derivatives of \(\phi_\gamma\) at the origin are different. The map is therefore continuous and piecewise smooth but not globally differentiable at \(u=0\). This does not introduce a singularity into the pricing model: \(\phi_\gamma\) is only an index-to-coordinate transformation used to construct the physical interpolation nodes.\\
+\\
+The local spacing is governed by \(\phi_\gamma'\). Since \(\cosh(\gamma u)\) is minimal at the origin and increases with \(\lvert u\rvert\), the smallest cells are located around the at-the-money region, whereas progressively wider cells are used in the tails. The inverse transformation on either side of the origin satisfies
+\[
+\lvert u\rvert
+=
+\frac{1}{\gamma}
+\operatorname{arsinh}
+\left(
+\frac{\sinh(\gamma)}{a_\pm}\lvert m\rvert
+\right)
+\]
+where \(a_-\) applies for \(m<0\) and \(a_+\) for \(m>0\).\\
+\\
+The associated continuous approximation of the physical node density is therefore
+\[
+\rho_\pm(m)
+=
+\frac{n_m-1}{2}
+\left\lvert\frac{\mathrm{d}u}{\mathrm{d}m}\right\rvert
+=
+\frac{n_m-1}{2}
+\frac{\sinh(\gamma)}{\gamma a_\pm}
+\left[
+1+
+\left(
+\frac{\sinh(\gamma)}{a_\pm}\lvert m\rvert
+\right)^2
+\right]^{-1/2}
+\]
+This density is maximal at \(m=0\) and decreases monotonically towards either endpoint. Hence, \(\gamma\) controls the strength of the spatial concentration without modifying the domain bounds or the number of nodes.\\
+\\
+Because \(n_m=2^{L_m}\) is even, zero is not itself a computational node. Instead, the two central nodes satisfy
+\[
+u_{n_m/2-1}=-\frac{1}{n_m-1},
+\qquad
+u_{n_m/2}=\frac{1}{n_m-1}
+\]
+and define the cell that straddles the ATM point.
+\begin{proposition}[ATM refinement factor]
+Let \(h_{\mathrm{ATM}}\) denote the width of the cell containing \(m=0\). Then
+\[
+h_{\mathrm{ATM}}
+=
+(a_-+a_+)
+\frac{\sinh\left(\gamma/(n_m-1)\right)}
+     {\sinh(\gamma)}
+\]
+For a uniform physical grid with the same bounds and cardinality,
+\[
+h_{\mathrm{unif}}
+=
+\frac{a_-+a_+}{n_m-1}
+\]
+and therefore
+\[
+\frac{h_{\mathrm{ATM}}}{h_{\mathrm{unif}}}
+=
+(n_m-1)
+\frac{\sinh\left(\gamma/(n_m-1)\right)}
+     {\sinh(\gamma)}
+\]
+Moreover, as \(n_m\rightarrow\infty\),
+\[
+\frac{h_{\mathrm{ATM}}}{h_{\mathrm{unif}}}
+\longrightarrow
+\frac{\gamma}{\sinh(\gamma)}
+\]
+\end{proposition}
+For the discretization used in our experiments,
+\[
+n_m=64,
+\qquad
+\gamma=3
+\]
+which gives
+\[
+\frac{h_{\mathrm{ATM}}}{h_{\mathrm{unif}}}
+\simeq 0.2996
+\]
+Thus, the ATM-straddling cell is approximately \(3.34\) times finer than its uniform-grid counterpart, while the number of tensor entries remains unchanged.\\
+\\
+This refinement has a direct interpolation interpretation. Let \(v(m)\) be twice continuously differentiable on a cell
+\[
+I_j=[m_j,m_{j+1}]
+\]
+and let \(\mathcal{I}_jv\) denote its linear interpolant. The classical local error bound is
+\[
+\sup_{m\in I_j}
+\left|v(m)-\mathcal{I}_jv(m)\right|
+\leq
+\frac{h_j^2}{8}
+\sup_{\xi\in I_j}
+\left|v''(\xi)\right|
+\]
+where
+\[
+h_j=m_{j+1}-m_j
+\]
+The hyperbolic-sine map reduces \(h_j^2\) precisely in the region where the option-price curvature is largest. It therefore approximates a curvature-adapted discretization without requiring the grid to be recalibrated for every volatility, maturity, or correlation specification.\\
+\\
+The transformation is also compatible with QTT tensorization. The physical index \(j\) retains its binary representation
+\[
+j
+=
+\sum_{\ell=1}^{L_m}
+2^{L_m-\ell}b_\ell,
+\qquad
+b_\ell\in\{0,1\}
+\]
+while only the deterministic map from \(j\) to \(m_j\) is modified. Hence, the QTT order, binary mode sizes, TT-cross sampling mechanism, and storage complexity remain unchanged \cite{khoromskij2011qtt,oseledets2011waveletQTT}. The grid deformation reallocates physical resolution without increasing the nominal tensor dimension.\\
+\\
+Figure~\ref{fig:sinh-moneyness-discretization} illustrates both effects. The first panel shows the nonlinear transformation from uniform computational indices to physical log-moneyness nodes. The second panel reports the resulting cell widths and makes the ATM refinement explicit.
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/sinh-moneyness-discretization.png}
+    \caption{
+    Hyperbolic-sine discretization of the log-moneyness coordinate.
+    Panel (a) compares the uniform physical map with the proposed
+    hyperbolic-sine map for \(n_m=64\) and \(\gamma=3\).
+    Panel (b) shows the corresponding local cell widths.
+    The vertical red line identifies the at-the-money point.
+    The adaptive grid achieves approximately \(3.34\) times finer local
+    resolution around the ATM region without increasing the QTT cardinality.
+    }
+    \label{fig:sinh-moneyness-discretization}
+\end{figure}
+The construction does not claim to solve an exact curvature-equidistribution problem. It provides instead a parsimonious and model-independent approximation to such a grid. Increasing \(\gamma\) improves ATM resolution but enlarges the tail cells, so the concentration parameter must ultimately be assessed through out-of-sample error, tail robustness, and exercise-frontier diagnostics. The ablation protocol developed in the following sections is designed to verify that the reduction of central interpolation error is not obtained at the cost of unacceptable deterioration in the tails.
+\subsection{Short-maturity refinement}
+\label{subsec:short-maturity refinement}
+The log-moneyness transformation concentrates the payoff transition around the fixed hyperplane \(m=0\), but the spatial extent of this transition remains maturity-dependent. Under a diffusion model, the terminal payoff kink is smoothed over a region whose characteristic width is of order
+\[
+\sigma_{\mathrm{eff}}\sqrt{T}
+\]
+Consequently, the price surface develops a narrow convexity ridge as \(T\) approaches zero. At the money, the time value is typically of order \(\sqrt{T}\), while its maturity derivative may grow as \(T^{-1/2}\). Uniform maturity spacing therefore allocates insufficient resolution to the region where the surface varies most rapidly.\\
+\\
+Let
+\[
+0<T_{\min}<T_{\max}
+\]
+be the maturity bounds and let \(n_T=2^{L_T}\) be the number of maturity nodes. We introduce a uniform computational coordinate
+\[
+v_j=\frac{j}{n_T-1},
+\qquad
+j=0,\ldots,n_T-1
+\]
+and map it to physical maturity through
+\[
+T_j
+=
+T_{\min}
++
+\left(T_{\max}-T_{\min}\right)v_j^p,
+\qquad
+p>1
+\]
+The exponent \(p\) controls the concentration near the shortest maturity. The map is strictly increasing, preserves both endpoints and leaves the QTT cardinality unchanged. Its derivative is
+\[
+\frac{\mathrm{d}T}{\mathrm{d}v}
+=
+p\left(T_{\max}-T_{\min}\right)v^{p-1}
+\]
+and therefore vanishes at \(v=0\). The smallest maturity cells are consequently placed near \(T_{\min}\), while their width increases progressively towards \(T_{\max}\).\\
+\\
+The first physical cell has width
+\[
+h_{T,\min}
+=
+\frac{T_{\max}-T_{\min}}
+     {(n_T-1)^p}
+\]
+whereas the spacing of a uniform maturity grid is
+\[
+h_{T,\mathrm{unif}}
+=
+\frac{T_{\max}-T_{\min}}
+     {n_T-1}
+\]
+Hence, the short-maturity refinement factor is
+\[
+\frac{h_{T,\min}}{h_{T,\mathrm{unif}}}
+=
+(n_T-1)^{1-p}
+\]
+In our experiments, we use the quadratic transformation
+\[
+p=2
+\]
+with \(n_T=8\). The first maturity cell is therefore seven times finer than under uniform discretization, without adding any QTT mode or increasing the number of tensor entries.\\
+\\
+This refinement complements the hyperbolic-sine moneyness grid. The latter concentrates nodes across the spatial direction normal to the payoff kink, whereas the maturity transformation resolves the rapid contraction of the convexity region as expiry approaches. The resulting two-dimensional node allocation is concentrated around the joint critical region
+\[
+m\simeq 0,
+\qquad
+T\simeq T_{\min}
+\]
+For American options, the same refinement also improves the representation of the short-dated exercise premium and of the rapidly evolving exercise frontier. It does not, however, eliminate the statistical noise of the LSMC pricing oracle. The benefit of the maturity grid must therefore be assessed separately from Monte Carlo label variance through the controlled ablation protocol introduced below.
+\subsection{Preservation of the QTT architecture}
+QTT tensorization acts on discrete grid indices rather than on the corresponding physical coordinates. For each dimension \(k\), the physical node is obtained through an index-to-coordinate map as describe in Eq.~\eqref{eq:grid_nodes}. 
+The proposed transformations replace the affine maps of the moneyness and maturity axes by the nonlinear maps introduced in Sections 4.2 and 4.3. They preserve the number of nodes along every dimension, which remains a power of two. Consequently, the tensor shape, binary mode structure, mode ordering and admissible TT-cross index set are unchanged.\\
+\\
+When TT-cross selects a multi-index, the corresponding physical moneyness and maturity are first obtained from the transformed grids. The strike is then reconstructed as \(K=B(\boldsymbol{s})e^m\), and the pricing oracle returns
+\begin{equation}
+\mathcal{A}_{\boldsymbol{i}_S,j,q,\ell}
+=
+V
+\left(
+\boldsymbol{s}_{\boldsymbol{i}_S},
+B(\boldsymbol{s}_{\boldsymbol{i}_S})e^{m_j},
+r_q,
+T_\ell
+\right)
+\end{equation}
+TT-cross therefore requires no modification. Off-grid interpolation only uses the actual non-uniform node locations when computing the local weights, while the subsequent QTT contractions remain identical.\\
+\\
+Preserving the architecture does not imply preserving the ranks. The coordinate transformations change the numerical organization of the sampled price surface and may therefore change the QTT ranks required to reach a prescribed tolerance. Their effect on compressibility is assessed empirically through the rank, error and evaluation-budget comparisons reported in Section 6.
+\section{Error Decomposition and Validation Protocol}
+\label{sec:error-validation}
+The deterministic decomposition
+\eqref{eq:deterministic-error-decomposition} separates interpolation from
+nodal reconstruction. We now extend it to a possibly biased and noisy pricing
+oracle, and then specify how the resulting terms are isolated in the
+experiments.
+\subsection{Sources of Approximation Error}
+\label{subsec:error-sources}
+Let \(\mathcal{A}\) be the exact nodal pricing tensor defined in
+Section~\ref{subsec:tt-qtt}, let \(\mathcal{Y}\) denote the tensor returned by
+the pricing oracle, and let \(\widehat{\mathcal{Y}}\) be its TT-cross
+reconstruction. Taking expectations entrywise over repeated oracle
+realizations, define
+\begin{equation}
+\mathcal{B}_{\mathrm{orc}}
+=
+\mathcal{A}
+-
+\mathbb{E}\left[\mathcal{Y}\right]
+\qquad
+\mathcal{N}_{\mathrm{orc}}
+=
+\mathbb{E}\left[\mathcal{Y}\right]
+-
+\mathcal{Y}
+\qquad
+\mathbb{E}\left[\mathcal{N}_{\mathrm{orc}}\right]=0
+\label{eq:oracle-bias-noise}
+\end{equation}
+where \(\mathcal{B}_{\mathrm{orc}}\) is the oracle bias measured as exact value
+minus expected oracle output, and \(\mathcal{N}_{\mathrm{orc}}\) is its
+centered sampling noise. The off-grid surrogate is
+\(\widehat V=\mathcal{I}_h\widehat{\mathcal{Y}}\), so
+\begin{equation}
+\begin{aligned}
+V(\boldsymbol{x})-\widehat V(\boldsymbol{x})
+={}&
+\underbrace{
+V(\boldsymbol{x})
+-
+\mathcal{I}_h\mathcal{A}(\boldsymbol{x})
+}_{\varepsilon_{\mathrm{grid}}(\boldsymbol{x})}
++
+\underbrace{
+\mathcal{I}_h\mathcal{B}_{\mathrm{orc}}(\boldsymbol{x})
+}_{\varepsilon_{\mathrm{bias}}(\boldsymbol{x})}
+\\
+&+
+\underbrace{
+\mathcal{I}_h\mathcal{N}_{\mathrm{orc}}(\boldsymbol{x})
+}_{\varepsilon_{\mathrm{noise}}(\boldsymbol{x})}
++
+\underbrace{
+\mathcal{I}_h
+\left(
+\mathcal{Y}-\widehat{\mathcal{Y}}
+\right)(\boldsymbol{x})
+}_{\varepsilon_{\mathrm{TT}}(\boldsymbol{x})}
+\end{aligned}
+\label{eq:complete-error-decomposition}
+\end{equation}
+The first term is the interpolation error imposed by the physical grid. Its
+dependence on local spacing and curvature was established in
+Section~\ref{subsec:off-grid-interpolation}; it is unaffected by increasing the
+TT-cross budget. The adaptive grid is designed specifically to reduce this
+term near the short-maturity convexity ridge without increasing the tensor
+cardinality.\\
+\\
+For the analytical European oracle,
+\(\mathcal{B}_{\mathrm{orc}}=\mathcal{N}_{\mathrm{orc}}=0\). For the American
+LSMC oracle, the bias term includes time discretization, regression
+approximation and the suboptimal stopping rule, whereas the noise term reflects
+finite-path sampling \cite{longstaff2001leastSquares,glasserman2004montecarlo}.
+Under standard regularity conditions, this sampling component retains the
+usual Monte Carlo scale
+\(\mathcal{O}(N_{\mathrm{path}}^{-1/2})\), while the regression and stopping
+biases require separate convergence checks.
+A fixed seed and common random numbers make \(\mathcal{Y}\) a consistent tensor
+during one reconstruction, as discussed in
+Section~\ref{subsec:reconstruction-conditions}, but they do not remove either
+source of error.\\
+\\
+The final term measures how accurately TT-cross reproduces the particular
+oracle tensor that it observes \cite{oseledets2010ttcross}. With noisy labels,
+a small \(\varepsilon_{\mathrm{TT}}\) may therefore indicate that the
+reconstruction fits a fixed noise realization rather than the exact price
+surface. The four terms in \eqref{eq:complete-error-decomposition} are not
+assumed to be independent, so their squared magnitudes cannot in general be
+added. In practice, a budget-dependent error decrease identifies a
+reconstruction-limited regime, whereas a persistent plateau indicates a grid
+or oracle floor.
+\subsection{Independent Validation and Metrics}
+\label{subsec:validation-metrics}
+
+All configurations are evaluated on the same set of off-grid states
+\[
+\mathcal{X}_{\mathrm{test}}
+=
+\left\{
+\boldsymbol{x}^{(1)},\ldots,\boldsymbol{x}^{(N_{\mathrm{test}})}
+\right\}
+\]
+which is generated independently of the TT-cross indices. Uniform and adaptive
+grids use the same tensor shape, oracle budget, stopping tolerance and paired
+reconstruction seeds. The GPR benchmark is evaluated on the same test set and
+under the same oracle-evaluation budget.\\
+\\
+For European options, the reference labels are analytical and therefore isolate
+the grid and reconstruction terms. For American options, they are obtained
+from independent, higher-precision LSMC simulations using path sets and seeds
+that were not used during reconstruction. One-dimensional binomial checks and
+path and exercise-date convergence tests are used to verify that the remaining
+reference error is small relative to the surrogate errors
+\cite{longstaff2001leastSquares,glasserman2004montecarlo}.\\
+\\
+To compare states with different basket scales, define the normalized test
+error
+\begin{equation}
+e_n
+=
+\frac{
+\widehat V\left(\boldsymbol{x}^{(n)}\right)
+-
+V_{\mathrm{ref}}\left(\boldsymbol{x}^{(n)}\right)
+}{
+B\left(\boldsymbol{s}^{(n)}\right)
+}
+\label{eq:normalized-test-error}
+\end{equation}
+and report
+\begin{equation}
+\operatorname{MAE}
+=
+\frac{1}{N_{\mathrm{test}}}
+\sum_{n=1}^{N_{\mathrm{test}}}|e_n|
+\qquad
+\operatorname{RMSE}
+=
+\left(
+\frac{1}{N_{\mathrm{test}}}
+\sum_{n=1}^{N_{\mathrm{test}}}e_n^2
+\right)^{1/2}
+\qquad
+E_{\infty}
+=
+\max_n|e_n|
+\label{eq:error-metrics}
+\end{equation}
+Percentage errors relative to the option price are not used as primary metrics
+because they become unstable for prices close to zero. The same metrics are
+also computed separately near the at-the-money region, at short maturities and
+in the moneyness tails.\\
+\\
+Predictive accuracy is reported together with the effective QTT ranks, number
+of oracle evaluations and wall-clock time. Comparisons across grid
+configurations are paired by seed and repeated over increasing TT-cross
+budgets. This protocol distinguishes a genuine reduction of the interpolation
+floor from changes caused by initialization, computational effort or a
+particular realization of the LSMC noise.
+
+\section{Results}
+\label{sec:results}
+The experiments retain the eight-dimensional domain, tensor shape
+\(32^5\times64\times8\times8\) and 37-core QTT representation used by
+Gribben et al.\ \cite{Gribben2026STNGPR}. Four physical grids are considered:
+\[
+\begin{aligned}
+\mathcal{G}_{00}&:\ \text{uniform absolute strike and uniform maturity}
+\\
+\mathcal{G}_{01}&:\ \text{uniform absolute strike and refined maturity}
+\\
+\mathcal{G}_{10}&:\ \text{hyperbolic-sine log-moneyness and uniform maturity}
+\\
+\mathcal{G}_{11}&:\ \text{hyperbolic-sine log-moneyness and refined maturity}
+\end{aligned}
+\]
+They share the same tensor shape, QTT encoding and pricing domain; only the
+mapping from discrete indices to physical strike or moneyness and maturity
+values is modified.\\
+\\
+The experimental design is staged according to the purpose of each benchmark.
+For the analytical European option, the original grid
+\(\mathcal{G}_{00}\) is compared with the complete adaptive construction
+\(\mathcal{G}_{11}\) over increasing TT-cross budgets, thereby measuring the
+combined effect of the proposed coordinate transformations. For the American
+option, a preliminary low-budget \(2\times2\) screening compares all four
+configurations and identifies log-moneyness as the dominant source of
+improvement. The main robustness experiment then compares
+\(\mathcal{G}_{10}\) with \(\mathcal{G}_{11}\) across three budgets and five
+paired reconstruction seeds, isolating the additional contribution of
+short-maturity refinement after the moneyness transformation has been fixed.
+All paired comparisons use identical test states and numerical settings; the
+American errors are evaluated against independently generated,
+higher-precision LSMC references.\\
+\\
+The comparison is therefore between different physical parameterizations of
+the same discrete tensor architecture rather than tensors of different sizes.
+The original study reported error and training-time curves for STN-GPR and GPR
+on the uniform absolute-strike grid, but did not provide a coordinate ablation
+or the associated effective ranks. The numerical baseline below is our
+reproduction of that grid rather than a digitization of the published curves.
+Unless stated otherwise, MAE values are expressed in option price units.
+\subsection{European options}
+\label{subsec:european-results}
+The controlled benchmark is the European put on the geometric average of five
+assets. All marginal volatilities are \(20\%\), all off-diagonal correlations
+are \(0.3\), and the reference prices are analytical. The original and adaptive
+grids are evaluated on the same \(2{,}000\) independently sampled off-grid
+states. Since the tensor shape and TT-cross budgets are unchanged, the number
+of oracle calls is nearly identical in every paired run.
+\begin{table}[H]
+    \centering
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{rrrrrrrrr}
+        \toprule
+        & \multicolumn{2}{c}{Oracle evaluations}
+        & \multicolumn{2}{c}{Effective rank}
+        & \multicolumn{2}{c}{Price MAE}
+        & \multicolumn{2}{c}{Prediction time (ms)} \\
+        Budget & Original & Adaptive & Original & Adaptive
+        & Original & Adaptive & Original & Adaptive \\
+        \midrule
+        \(5{,}000\)  & \(6{,}992\)  & \(6{,}994\)  & \(8.55\)  & \(4.47\) & \(4.622\) & \(0.104\)  & \(2.384\)  & \(0.949\) \\
+        \(10{,}000\) & \(11{,}940\) & \(11{,}995\) & \(11.43\) & \(5.16\) & \(1.859\) & \(0.0845\) & \(3.729\)  & \(1.097\) \\
+        \(20{,}000\) & \(21{,}942\) & \(21{,}803\) & \(15.29\) & \(6.08\) & \(1.426\) & \(0.0832\) & \(5.895\)  & \(1.446\) \\
+        \(50{,}000\) & \(51{,}642\) & \(51{,}847\) & \(21.45\) & \(7.35\) & \(0.648\) & \(0.0831\) & \(10.747\) & \(1.799\) \\
+        \bottomrule
+    \end{tabular}}
+    \caption{European geometric-basket put results. Prediction time is the
+    measured mean wall-clock time per off-grid query. The TT-ANOVA
+    initialization evaluations are included in the oracle counts.}
+    \label{tab:european-grid-results}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/results-european-grid.pdf}
+    \caption{European effective rank and out-of-sample price MAE as functions
+    of the nominal TT-cross budget. Both grids have the same tensor
+    cardinality and are evaluated on the same analytical test set.}
+    \label{fig:european-grid-results}
+\end{figure}
+The adaptive parameterization improves both accuracy and compressibility over
+the complete budget range. At the largest budget, the effective rank decreases
+from \(21.45\) to \(7.35\), a reduction of \(65.7\%\), while the price MAE
+decreases from \(0.648\) to \(0.0831\). The corresponding normalized MAE
+decreases from \(1.57\times10^{-2}\) to \(2.02\times10^{-3}\). The lower rank
+also reduces the measured prediction time by \(83.3\%\), consistently with the
+rank dependence of TT storage and contraction costs established in
+Section~\ref{subsec:tt-qtt}.\\
+\\
+The gain is not merely a displacement along the same budget curve. With only
+\(6{,}994\) oracle evaluations, the adaptive grid attains a MAE of \(0.104\),
+whereas the original grid remains at \(0.648\) after \(51{,}642\) evaluations.
+Within the tested range, the adaptive construction therefore achieves a lower
+error with \(86.5\%\) fewer oracle calls than the most accurate reproduced
+uniform-grid tensor. \\
+\\
+The error curve also identifies the limiting term in
+\eqref{eq:complete-error-decomposition}. Exact multilinear interpolation of the
+analytical nodal tensor on the adaptive grid has MAE \(0.08310\). The adaptive
+TT reaches \(0.08323\) at budget \(20{,}000\) and \(0.08310\) at budget
+\(50{,}000\). Further TT-cross sampling therefore removes essentially no test
+error: reconstruction is no longer limiting and the remaining discrepancy is
+the interpolation floor of the chosen physical grid. The original-grid curve
+is still decreasing at the largest tested budget, so its interpolation floor
+is not identified by these runs.\\
+\\
+These results extend, rather than contradict, the conclusion of the previous
+study. Gribben et al.\ showed that TT-cross can access much larger effective
+training sets than exact GPR on the original grid
+\cite{Gribben2026STNGPR}. The present experiment shows that the physical
+organization of those grid points is equally important: changing coordinates
+without enlarging the tensor produces a smoother, substantially lower-rank
+QTT representation.
+\subsection{American options}
+\label{subsec:american-results}
+The American benchmark is a put on the arithmetic average of the same five
+assets. Training labels use LSMC with \(2{,}000\) paths and 15 exercise dates.
+Independent references use \(25{,}000\) paths, 60 exercise dates and five seeds
+\(901,\ldots,905\). The robustness experiment contains \(200\) test states,
+stratified across five moneyness and four maturity regimes, and compares
+hyperbolic-sine log-moneyness with either uniform or short-maturity-refined
+time nodes. Three budgets and five paired TT initializations give 30 completed
+reconstructions. \\
+\\
+The pricing oracle was checked separately before comparing grids. Across 60
+one-dimensional American-put scenarios, the \(25{,}000\)-path, 60-date LSMC
+reference has mean absolute bias \(0.01365\) against a 3,000-step binomial tree,
+with maximum absolute bias \(0.07449\). The binomial price lies inside the LSMC
+\(95\%\) confidence interval in \(71.7\%\) of the cases, indicating that
+regression and time-discretization bias remain visible. On the multi-asset
+convergence set, the \(2{,}000\)-path, 15-date training oracle has MAE
+\(0.01344\) and RMSE \(0.02721\) against the high-precision reference. Oracle
+error is therefore smaller than the surrogate errors reported below, but it is
+not negligible.
+\begin{table}[H]
+    \centering
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{rrrrrrrr}
+        \toprule
+        & \multicolumn{2}{c}{Price MAE}
+        & \multicolumn{2}{c}{Effective rank}
+        & & \multicolumn{2}{c}{Fit time (s)} \\
+        Budget & Uniform \(T\) & Adaptive \(T\) & Uniform \(T\) & Adaptive \(T\)
+        & Adaptive wins & Uniform \(T\) & Adaptive \(T\) \\
+        \midrule
+        \(7{,}500\)  & \(0.1177\pm0.0647\) & \(0.0621\pm0.0119\) & \(10.20\pm0.34\) & \(10.07\pm0.18\) & \(5/5\) & \(68.0\) & \(58.7\) \\
+        \(9{,}000\)  & \(0.1040\pm0.0675\) & \(0.0555\pm0.0093\) & \(11.07\pm0.46\) & \(10.95\pm0.19\) & \(5/5\) & \(78.2\) & \(69.2\) \\
+        \(12{,}000\) & \(0.0992\pm0.0687\) & \(0.0582\pm0.0136\) & \(12.45\pm0.38\) & \(12.47\pm0.19\) & \(3/5\) & \(91.5\) & \(85.1\) \\
+        \bottomrule
+    \end{tabular}}
+    \caption{American arithmetic-basket put robustness results. Entries are
+    means and standard deviations across five paired TT initializations.
+    Adaptive wins count the seeds for which short-maturity refinement lowers
+    the MAE relative to uniform maturity at the same budget.}
+    \label{tab:american-grid-results}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/results-american-grid.pdf}
+    \caption{American price MAE and effective rank across five paired
+    reconstructions. Error bars show one standard deviation. Both curves use
+    adaptive log-moneyness; only the maturity discretization differs.}
+    \label{fig:american-grid-results}
+\end{figure}
+Short-maturity refinement lowers the mean MAE by \(47.2\%\), \(46.6\%\) and
+\(41.3\%\) at budgets \(7{,}500\), \(9{,}000\) and \(12{,}000\), respectively.
+It also reduces the dispersion across initializations by more than \(80\%\) at
+each budget. The result is strongest at \(9{,}000\): all five paired runs
+improve, the mean MAE is \(0.0555\), and the standard deviation is \(0.0093\). \\
+\\
+The rank evidence is more limited than in the European experiment. Mean ranks
+are marginally lower at \(7{,}500\) and \(9{,}000\), and essentially unchanged
+at \(12{,}000\). The lower mean fit times are consistent with a modest numerical
+benefit, but they do not establish a structural complexity reduction of the
+same magnitude as for the analytical European surface. The defensible
+American conclusion is therefore improved accuracy and initialization
+stability at comparable rank and oracle budget.\\
+\\
+Increasing the budget beyond \(9{,}000\) does not improve the adaptive mean
+error. At \(12{,}000\), the rank and fit time increase, the MAE rises slightly,
+and only three of the five paired seeds outperform uniform maturity. This point
+fails the pre-specified \(80\%\) paired-win robustness criterion. The
+\(9{,}000\)-evaluation regime is consequently the best observed compromise,
+not a universally optimal budget. \\
+\\
+A preliminary full \(2\times2\) ablation at budget \(2{,}000\) gives MAE
+\(9.817\), \(8.609\), \(0.903\) and \(0.394\) for
+\(\mathcal{G}_{00},\mathcal{G}_{01},\mathcal{G}_{10}\) and
+\(\mathcal{G}_{11}\), respectively. It indicates that log-moneyness supplies
+the dominant improvement and that maturity refinement provides an additional
+gain. Because this screening run uses only ten test points and a
+\(500\)-path LSMC oracle, it is treated as qualitative support rather than as
+the primary numerical result. \\
+\\
+The original STN-GPR paper used \(10{,}000\) LSMC paths and 30 exercise dates
+and reported STN-versus-GPR accuracy as a function of training time
+\cite{Gribben2026STNGPR}. Our multi-seed ablation deliberately uses a cheaper
+training oracle and an independent, higher-precision reference. Absolute
+wall-clock times and MAEs are therefore not claimed to be directly comparable
+to its plotted values. The comparable object is the grid architecture: at the
+same nominal tensor size, the transformed grid allocates the available TT-cross
+samples more effectively in the regions that dominate American pricing error.
+
+\section{Conclusion}
+This work shows that the efficiency of a Tensor-Train pricing surrogate depends
+not only on the reconstruction algorithm, but also on the physical coordinates
+used to organize the pricing tensor. Building on the STN-GPR architecture of
+Gribben et al.\ \cite{Gribben2026STNGPR}, we replaced absolute strike by basket
+log-moneyness and concentrated a fixed number of nodes around the at-the-money
+region and short maturities without modifying QTT architecture. For the
+European benchmark, this reduces the effective rank from \(21.45\) to \(7.35\),
+the price MAE from \(0.648\) to \(0.0831\), and the measured prediction time by
+\(83.3\%\). The surrogate also reaches the interpolation floor of the adaptive
+grid.\\
+\\
+For the American benchmark, short-maturity refinement reduces the mean error
+and its dispersion across reconstruction seeds while leaving the effective
+ranks broadly unchanged. Budget \(9{,}000\) provides the best observed
+compromise; a larger budget increases cost without improving mean accuracy.
+The American evidence therefore supports improved accuracy and robustness, but
+not a general claim of rank reduction, and the attainable error remains partly
+limited by the bias and sampling noise of the LSMC oracle.\\
+\\
+These results establish coordinate design as a structural component of
+tensor-network option pricing. A second paper will use the framework developed
+here to investigate Delta, Gamma and cross-Gamma estimation, and to assess the
+surrogate as a repeated revaluation engine for Value-at-Risk and Expected
+Shortfall. Particular attention will be paid to error amplification under
+differentiation and to the validation of portfolio-tail estimates. Separating
+these questions keeps the present contribution focused on the pricing,
+compression and robustness properties on which those applications depend.\\
+\\
+The accuracy gained through this coordinate design, particularly for European baskets, makes the resulting grid possibly usable for fast pricing in a trading context. A natural use case is the computation of Greeks making the surrogate well suited to intraday hedging and to model validation workflows where dense and repeated revaluation is required.\\
+\\
+Beyond its immediate classical benefits, the proposed QTT representation also provides a natural interface with future quantum implementations. Tensor Trains are mathematically equivalent to Matrix Product States, a standard tensor-network representation of multiqubit quantum states, and low-rank MPS representations can be compiled into quantum circuits composed of one- and two-qubit gates \cite{orus2014tensorNetworks,Ran2020MPSQuantumCircuits}. By expressing the pricing surface through binary modes while preserving low tensor ranks, the present framework therefore produces a representation that could serve as a structured starting point for quantum state preparation or hybrid quantum--classical pricing algorithms. This connection does not imply an automatic quantum advantage, since normalization, data loading, circuit depth, measurement costs and hardware noise would still need to be addressed. Nevertheless, it makes the proposed implementation compatible with a longer-term transition towards quantum computing, without requiring the high-dimensional pricing problem to be reformulated from scratch.
+
+\appendix
+
+\section{Proof of Separability}
+\label{app:separability-proof}
+Let $\Omega$ be the computational space, formally
+\[
+\Omega = I_{S_1}\times \dots \times I_{S_5} \times I_m \times I_r \times I_T \subset \mathbb{R}^8
+\]
+where 
+\[
+I_S = [S_{min},S_{max}], \quad I_m = [m_{min}, m_{max}], \quad I_r = [r_{min}, r_{max}], \quad I_T =[T_{min}, T_{max}]
+\]
+or more generally 
+\[
+\Omega = \prod _{k=1} ^d I_k, \qquad d = d_S +3
+\]
+For each interval, $I_k = [a_k, b_k]$, consider 
+\[
+D_k = \left(\mathbb{Q} \cap (a_k,b_k) \right) \cup \{a_k,b_k\}
+\]
+The set $D_k$ is countable because $\mathbb{Q}$ is countable. $\D_k$ is also dense in $I_k$. Let define 
+\[
+D = D_1 \times \dots \times D_d \subset \Omega
+\]
+As $D$ is a finite product of countable set it is countable. Now let's show that $D$ is dense in $\Omega$. Let 
+\[
+\boldsymbol{x} = (x_1,\dots,x_d) \in \Omega
+\]
+and let's $\varepsilon > 0$. Since $D_k$ is dense in $I_k$, there exist for every $k$, an element $q_k \in D_k$ such that :
+\[
+|x_k - q_k| < \frac{\varepsilon}{\sqrt{d}}
+\]
+defining $\boldsymbol{q} = (q_1,\dots,q_k) \in D$, we obtain 
+\[
+||\boldsymbol{x} - \boldsymbol{q}||_2 ^2 = \sum _{k=1} ^d |x_k - q_k|^2 < \sum ^d _{k=1} \frac{\varepsilon ^2}{d} = \varepsilon^2
+\]
+So finally 
+\[
+||\boldsymbol{x} - \boldsymbol{q}||_2 < \varepsilon
+\]
+So any open ball centered on a point of $\Omega$ contain an element of $D$. Consequently 
+\[
+\bar{D} = D
+\]
+$\Omega$ possess a dense countable part, so $\Omega$ is separable by definition. It appear, thank to this demonstration that adding $I_{\sigma}$ does not annihilate the separability of the space in a topological sense. 
+
+\newpage
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
+
+
+

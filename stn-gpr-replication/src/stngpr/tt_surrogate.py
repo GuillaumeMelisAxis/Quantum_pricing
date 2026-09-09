@@ -214,3 +214,51 @@ class TTPriceSurrogate:
             values = self.predict_on_grid(flat).reshape(corners.shape[:2])
             out[start : start + len(batch)] = np.sum(weights * values, axis=1)
         return out
+
+    def predict_factorized(
+        self,
+        points: np.ndarray,
+        cubic_columns=(),
+        batch_size: int = 2_048,
+    ) -> np.ndarray:
+        """Off-grid interpolation contracted mode by mode instead of by corners.
+
+        The interpolation weight is a product over physical dimensions and the
+        TT value is a product of core slices, so the product stencil
+        factorizes: each dimension only needs its own candidate index chains
+        blended in place. Cost falls from ``prod_j k_j`` tensor lookups per
+        query to ``sum_j k_j q_j`` small matrix products, where ``k_j`` is two
+        on a linear axis and four on a cubic one.
+
+        With ``cubic_columns`` empty this is the multilinear interpolant of
+        :meth:`predict`; otherwise it matches :meth:`predict_hybrid_cubic`.
+        Making an axis cubic costs one extra pair of chains on that axis alone,
+        so the cubic correction is nearly free here, while the corner stencil
+        pays a factor of two per cubic axis.
+        """
+        if self.cores is None:
+            raise RuntimeError("fit the surrogate first")
+        points = np.atleast_2d(np.asarray(points, dtype=float))
+        out = np.empty(len(points), dtype=float)
+        for start in range(0, len(points), batch_size):
+            batch = points[start : start + batch_size]
+            supports, weights = self.grid.axis_stencils(batch, cubic_columns)
+            v = np.ones((len(batch), 1), dtype=float)
+            core = 0
+            for j, q in enumerate(self.grid.bits):
+                shifts = np.arange(q - 1, -1, -1, dtype=np.int64)
+                blended = None
+                for candidate in range(supports[j].shape[1]):
+                    bits = (supports[j][:, candidate, None] >> shifts) & 1
+                    chain = v
+                    for k in range(q):
+                        g = self.cores[core + k]
+                        chain = np.einsum(
+                            "ma,amb->mb", chain, g[:, bits[:, k], :]
+                        )
+                    term = weights[j][:, candidate, None] * chain
+                    blended = term if blended is None else blended + term
+                v = blended
+                core += q
+            out[start : start + len(batch)] = v[:, 0]
+        return out

@@ -227,6 +227,93 @@ tail resolution, and a quadratic maturity grid near expiry. The European JSON
 also reports `oracle_interpolation`: the irreducible
 multilinear interpolation error of the selected grid before TT-cross error.
 
+## Volatility-extended European experiment
+
+An extension beyond the paper: each underlying carries its own volatility
+coordinate, so the surrogate covers
+`(S_1, sigma_1, S_2, sigma_2, ..., S_5, sigma_5, K, r, T)` instead of pricing a
+single fixed-volatility slice. Spots and volatilities are **interleaved** so that
+an asset sits next to its own volatility in the tensor-train mode ordering, and
+volatilities are gridded on `u_i = log(sigma_i)` over `sigma in [0.05, 0.80]`.
+The domain grows from 8 physical modes and 37 QTT cores to 13 modes and 57
+cores; the grid is `(32 x 16)^5 x 64 x 8 x 8`.
+
+```bash
+python scripts/reproduce_european_vol.py --profile intermediate
+python scripts/reproduce_european_vol.py --profile intermediate --grid-mode paper
+python scripts/reproduce_european_vol.py --profile smoke --vol-scale linear --oracle-only
+python scripts/reproduce_european_vol.py --profile paper --skip-gpr
+```
+
+`--vol-nodes` sets the resolution of each log-volatility axis, `--vol-scale`
+switches between the `log(sigma)` and plain `sigma` axis, `--vol-sampling`
+chooses the test law for sigma, and `--budgets` overrides the profile budgets.
+Each JSON adds a `headline` block with the effective rank, price MAE and
+seconds per query per model, and a `by_basket_volatility` error breakdown
+alongside the usual moneyness and maturity buckets.
+
+Profiles here are sized for 13 dimensions (`intermediate`: TT budgets
+20,000-200,000; `paper`: up to 1,000,000); the shared `smoke` budgets are a
+wiring check only. Under `log(K / basket_spot)` the grid corners reach strikes
+far outside `[K_min, K_max]`; that region is harmless when the deep-ITM price is
+a rank-one product of the basket spot and a `(m, r, T)` factor, but once the
+five volatility modes couple through `exp(T sigma_B^2 / 2)`, fitting the raw
+price plateaus. Moneyness grids therefore default to `--target
+price_over_basket`: TT, oracle and GPR learn `P / G(S)` - spot-free for the
+geometric closed form in these coordinates - and predictions are re-multiplied
+by the query point's exact basket spot, which restores convergence to the grid
+floor (MAE 0.130 at 50,000 evaluations against a 0.114 floor, versus a 7.2
+plateau on the raw price).
+
+Prediction uses `TTPriceSurrogate.predict_factorized`, which contracts each
+mode's candidate index chains in place rather than enumerating the product
+stencil. At `d = 13` that replaces 8,192 tensor lookups per query with 57 small
+matrix products; the scripts still time the corner stencil on a subset and
+record their agreement.
+
+Passing `cubic_columns` makes selected axes cubic instead of linear - four
+candidate chains on those axes rather than two. The weights still factorize per
+mode, so the cost stays `O(sum_j k_j q_j)`: making *every* axis cubic at most
+doubles the query, where the corner stencil pays a factor of two per cubic axis
+(measured 16,629x apart). Scripts expose this as `--cubic-axes`, taking any of
+`spots vols m r T` plus `all` and `none`, defaulting to `all`.
+
+Cubic interpolation is what removes the convexity bias of the multilinear
+scheme. On the volatility-extended geometric basket it cuts MAE from 0.1065 to
+0.0091 and bias from +0.1053 to +0.0017 for twice the query cost, with the
+tensor train, its rank and its storage completely unchanged - making the
+surrogate 2.4x more accurate than 100,000-path Monte Carlo and 167x faster.
+
+### Basket type, mode ordering and a Monte-Carlo reference
+
+Two validation scripts extend the experiment beyond the geometric closed form.
+
+```bash
+# grid rank and storage: arithmetic vs geometric, interleaved vs blocked  (~7 min)
+python scripts/validation/compare_basket_layouts.py --budgets 50000 100000
+
+# surrogate vs Monte Carlo at 10k and 100k paths, geometric basket  (~2 min)
+python scripts/validation/compare_monte_carlo.py
+```
+
+`VolatilityExtendedConfig(layout=...)` selects the mode ordering. `interleaved`
+pairs each spot with its own volatility; `blocked` places all spots first, then
+all volatilities. A coupling costs rank on every bond it must cross, so the
+better ordering is the one that keeps the dominant coupling contiguous - and
+which coupling dominates depends on the basket. Both scripts sweep the TT
+truncation tolerance, because the default `1e-8` is far tighter than the
+interpolation floor and inflates storage several-fold at unchanged accuracy.
+
+Arithmetic-basket labels come from `arithmetic_basket_put_levy`, a lognormal
+moment match. It is fast enough for a hundred thousand TT-cross calls and
+carries the true `exp(sigma_i sigma_j C_ij T)` cross terms, but it is an
+approximation: about 1.6% from Monte Carlo across this domain, under 0.4% below
+total volatility 0.2 and around 5% above 0.35. Surrogate error against it is
+therefore surrogate-versus-Levy, not surrogate-versus-truth.
+
+`basket_put_monte_carlo` simulates the five correlated assets to maturity in a
+single step and returns prices with their standard errors, for either basket.
+
 ## American validation sequence
 
 The four scripts below are intended to be run in order. Start with `smoke` and
@@ -481,6 +568,80 @@ every budget. It separates analytical error from TT-versus-grid reconstruction
 error and records raw/projected Hessian accuracy, PSD violations, TT rank,
 function evaluations, sweeps and timings. The JSON is checkpointed after the
 oracle and after every completed budget.
+
+## Monte-Carlo VaR by full grid revaluation
+
+The risk engine diffuses the five spots to the risk horizon under a correlated
+GBM and reprices every trade from scratch in every scenario. The pricer is any
+callable mapping market rows `(S_1, ..., S_5, K, r, T)` to prices, so the
+closed-form pricer, the interpolation oracle and a TT surrogate wrapped in
+`MarketCoordinatePricer` are interchangeable:
+
+    from stngpr.portfolio import Portfolio
+    from stngpr.risk import MonteCarloVaREngine
+    from stngpr.scenarios import GBMScenarioGenerator
+
+    portfolio = Portfolio.from_arrays(
+        strikes=[90.0, 100.0, 110.0],
+        maturities=[0.5, 1.0, 2.0],
+        quantities=[100.0, -75.0, 50.0],
+    )
+    engine = MonteCarloVaREngine(
+        portfolio,
+        GBMScenarioGenerator.from_config(config),
+        horizon=1.0 / 252.0,
+        levels=(0.95, 0.975, 0.99),
+    )
+    result = engine.run(pricer, spots, rate=0.03, n_scenarios=50_000, seed=config.seed)
+    print(result.var(0.99), result.expected_shortfall(0.99))
+
+Three modelling choices are explicit rather than implicit. Scenarios are drawn
+in one exact GBM step, which is exact for any payoff depending only on the state
+at the horizon. Every trade is aged by the horizon at fixed contractual strike.
+The default drift is risk-neutral; pass `drift` to `GBMScenarioGenerator` for a
+real-world measure.
+
+A position expiring inside the horizon has no live-option value to interpolate,
+and its payoff depends on the spot at its own expiry rather than at the horizon,
+which a one-step diffusion does not produce. `market_parameters` therefore
+refuses such a trade instead of clipping its maturity onto the grid floor.
+`Portfolio.split_at_horizon` performs the exclusion explicitly:
+
+    live, expiring = portfolio.split_at_horizon(horizon)
+
+It returns the split rather than applying it, because dropping a position
+changes the book: the resulting VaR is the VaR of `live`, not of `portfolio`,
+and the validation script records the excluded trades in its JSON.
+
+`simulate_spots` is separate from `run` so that a trusted pricer and a surrogate
+can be compared on identical scenarios. `compare_loss_distributions` then
+reports paired VaR/ES errors, Wasserstein distance, Spearman rank correlation
+and worst-tail set overlap; `var_es_uncertainty` reports the order-statistic VaR
+interval and the ES standard error, so surrogate error can be read against
+Monte-Carlo error; `domain_coverage` reports the fraction of scenario states
+falling outside the grid box, which is where an interpolant silently clamps.
+
+Run the paired experiment. The horizon defaults to one day:
+
+```bash
+python scripts/validation/validate_portfolio_var.py --profile smoke --grid-mode paper
+python scripts/validation/validate_portfolio_var.py \
+    --profile intermediate --grid-mode moneyness_adaptive
+python scripts/validation/validate_portfolio_var.py \
+    --profile intermediate --grid-mode paper --horizon-days 10
+```
+
+Shortening the horizon shrinks the P&L but not the pricing error, so the
+surrogate error matters more, not less, at one day than at ten. On the paper
+grid the oracle 95% VaR error grows from 0.5% at ten days to 4.4% at one day
+while the Monte-Carlo interval tightens, which makes the short horizon the
+binding accuracy test rather than the easy one.
+
+Use `--skip-tt` to measure only the interpolation floor of the selected grid in
+risk space. The JSON also contains the per-trade Euler decomposition of the
+expected shortfall and the break-even number of revaluations that amortizes the
+surrogate build cost. Against a closed-form pricer that break-even does not
+exist; it becomes the relevant number when the black box is LSMC.
 
 ## Publication figures
 
