@@ -83,10 +83,15 @@ from stngpr.validation import (
     stratified_american_points,
 )
 from stngpr.vol_extension import (
+    VOL_RISK_GRID_MODES,
     BasketScaledModelPricer,
+    VolExtendedPriceSurrogate,
+    VolStandardizedRiskTransform,
     build_vol_extended_grid,
+    build_vol_grid,
     resolve_cubic_columns,
     sample_market_points,
+    strike_axis_log_moneyness_nodes,
 )
 
 
@@ -1529,6 +1534,244 @@ class VolatilityExtensionTests(unittest.TestCase):
                 config.correlation,
                 config.dividends,
             ),
+            rtol=1e-12,
+        )
+
+
+
+class VolatilityExtendedRiskGridTests(unittest.TestCase):
+    """The Greek coordinate families, lifted onto the 2n+3 market vector."""
+
+    @staticmethod
+    def _mode_configs():
+        """Each risk mode with a domain on which its grid is representable.
+
+        Only ``standardized_risk`` needs the narrower box; the whole point of
+        the bounded variant is that it does not.
+        """
+        default = VolatilityExtendedConfig()
+        narrow = VolatilityExtendedConfig(volatility_bounds=(0.18, 0.22))
+        return [
+            (mode, narrow if mode == "standardized_risk" else default)
+            for mode in VOL_RISK_GRID_MODES
+        ]
+
+    def test_every_risk_mode_round_trips_market_coordinates(self):
+        rng = np.random.default_rng(101)
+        for mode, config in self._mode_configs():
+            with self.subTest(mode=mode):
+                _, transform, _ = build_vol_grid(config, mode)
+                x = sample_market_points(config, 64, rng)
+                np.testing.assert_allclose(
+                    transform.to_market(transform.to_model(x)), x, rtol=1e-12
+                )
+
+    def test_risk_modes_share_the_tensor_shape_of_the_pricing_grid(self):
+        shapes = []
+        for mode, config in self._mode_configs():
+            grid, _, description = build_vol_grid(config, mode)
+            shapes.append(grid.shape)
+            self.assertEqual(description["mode"], mode)
+            self.assertEqual(description["family"], "risk")
+        pricing, _, _ = build_vol_grid(
+            VolatilityExtendedConfig(), "moneyness_adaptive"
+        )
+        self.assertTrue(all(shape == shapes[0] for shape in shapes))
+        self.assertEqual(shapes[0], pricing.shape)
+        self.assertEqual(shapes[0], VolatilityExtendedConfig().physical_shape)
+
+    def test_bounded_standardized_nodes_stay_inside_the_market_box(self):
+        config = VolatilityExtendedConfig()
+        m_bounds = (
+            float(np.log(config.strike_bounds[0] / config.spot_bounds[1])),
+            float(np.log(config.strike_bounds[1] / config.spot_bounds[0])),
+        )
+        grid, transform, _ = build_vol_grid(config, "bounded_standardized_risk")
+        indices = grid.random_physical_indices(2_048, np.random.default_rng(13))
+        market = transform.to_market(grid.indices_to_points(indices))
+        spots = market[:, list(config.spot_columns)]
+        basket = np.exp(np.mean(np.log(spots), axis=1))
+        log_moneyness = np.log(market[:, config.strike_column] / basket)
+        self.assertGreaterEqual(np.min(log_moneyness), m_bounds[0] - 1e-13)
+        self.assertLessEqual(np.max(log_moneyness), m_bounds[1] + 1e-13)
+        volatilities = market[:, list(config.volatility_columns)]
+        self.assertGreaterEqual(np.min(volatilities), config.volatility_bounds[0] - 1e-13)
+        self.assertLessEqual(np.max(volatilities), config.volatility_bounds[1] + 1e-13)
+
+    def test_bounded_endpoints_pin_the_box_at_every_regime(self):
+        """-1 and +1 must map to the same two strikes for any (r, T, sigma)."""
+        config = VolatilityExtendedConfig()
+        grid, transform, description = build_vol_grid(
+            config, "bounded_standardized_risk"
+        )
+        m_bounds = description["moneyness_bounds"]
+        for rate in config.rate_bounds:
+            for maturity in config.maturity_bounds:
+                for sigma in config.volatility_bounds:
+                    nodes = strike_axis_log_moneyness_nodes(
+                        config, grid, transform, rate, maturity, sigma
+                    )
+                    np.testing.assert_allclose(
+                        [nodes[0], nodes[-1]], m_bounds, atol=1e-12
+                    )
+
+    def test_standardized_coordinate_tracks_the_row_volatility(self):
+        """The same strike is fewer standard deviations out at higher sigma."""
+        config = VolatilityExtendedConfig()
+        transform = VolStandardizedRiskTransform(
+            n_assets=config.n_assets,
+            spot_columns=config.spot_columns,
+            volatility_columns=config.volatility_columns,
+            strike_column=config.strike_column,
+            rate_column=config.rate_column,
+            maturity_column=config.maturity_column,
+            correlation=config.correlation,
+            dividends=config.dividends,
+            log_volatility=False,
+        )
+        rows = []
+        for sigma in (0.05, 0.80):
+            row = np.zeros(config.n_dimensions)
+            row[list(config.spot_columns)] = 100.0
+            row[list(config.volatility_columns)] = sigma
+            row[config.strike_column] = 70.0
+            row[config.rate_column] = 0.03
+            row[config.maturity_column] = 1.0
+            rows.append(row)
+        coordinate = transform.to_model(np.asarray(rows))[:, config.strike_column]
+        self.assertLess(abs(coordinate[1]), abs(coordinate[0]))
+        # a frozen-volatility coordinate would give the same value twice
+        self.assertGreater(abs(coordinate[0] - coordinate[1]), 1.0)
+
+    def test_unbounded_standardized_risk_is_rejected_when_it_overflows(self):
+        config = VolatilityExtendedConfig()
+        with self.assertRaises(ValueError) as raised:
+            build_vol_grid(config, "standardized_risk")
+        self.assertIn("bounded_standardized_risk", str(raised.exception))
+        # it stays available where the envelope is representable
+        narrow = VolatilityExtendedConfig(volatility_bounds=(0.18, 0.22))
+        grid, _, description = build_vol_grid(narrow, "standardized_risk")
+        self.assertEqual(grid.shape, narrow.physical_shape)
+        self.assertLess(
+            description["construction"]["extreme_physical_log_moneyness"],
+            np.log(np.finfo(float).max),
+        )
+
+    def test_gamma_monitor_spans_the_volatility_regimes(self):
+        config = VolatilityExtendedConfig()
+        _, _, description = build_vol_grid(config, "gamma_monitor")
+        construction = description["construction"]
+        self.assertEqual(
+            len(construction["basket_volatilities"]),
+            len(construction["maturities"]),
+        )
+        self.assertGreater(len(set(construction["basket_volatilities"])), 1)
+        reference = construction["reference_volatilities"]
+        self.assertAlmostEqual(reference[0], config.volatility_bounds[0])
+        self.assertAlmostEqual(reference[-1], config.volatility_bounds[1])
+
+    def test_gamma_monitor_axis_is_unchanged_by_a_scalar_regime(self):
+        """The paper's fixed-volatility call must be untouched by the change."""
+        config = PaperConfig()
+        basket_sigma, basket_carry = geometric_basket_effective_parameters(
+            0.03, config.volatilities, config.correlation, config.dividends
+        )
+        maturities = np.array([7.0, 30.0, 365.0]) / 365.0
+        scalar, _ = gamma_monitor_axis(
+            -1.0, 0.8, 64, maturities, 0.03, basket_sigma, basket_carry,
+            dense_nodes=1025,
+        )
+        broadcast, _ = gamma_monitor_axis(
+            -1.0, 0.8, 64, maturities, 0.03,
+            np.full(3, basket_sigma), np.full(3, basket_carry),
+            dense_nodes=1025,
+        )
+        np.testing.assert_array_equal(scalar, broadcast)
+
+    def test_risk_grid_rejects_pricing_only_arguments(self):
+        config = VolatilityExtendedConfig()
+        with self.assertRaises(TypeError):
+            build_vol_grid(config, "moneyness_adaptive", monitor_rate=0.05)
+        with self.assertRaises(ValueError):
+            build_vol_grid(config, "not_a_mode")
+
+
+class VolatilityExtendedPricingTests(unittest.TestCase):
+    """Pricing a basket put through a fitted volatility-extended grid."""
+
+    def test_the_fit_target_is_scaled_only_on_moneyness_grids(self):
+        config = VolatilityExtendedConfig()
+        for mode in ("m_uniform", "bounded_standardized_risk", "moneyness_adaptive"):
+            self.assertEqual(
+                VolExtendedPriceSurrogate(config, mode).target, "price_over_basket"
+            )
+        self.assertEqual(
+            VolExtendedPriceSurrogate(config, "paper").target, "price"
+        )
+
+    def test_interpolation_floor_recovers_the_price_on_grid_nodes(self):
+        """At a node the interpolant is the oracle, so only the scaling can err."""
+        config = VolatilityExtendedConfig()
+        grid, transform, _ = build_vol_grid(config, "bounded_standardized_risk")
+        model = VolExtendedPriceSurrogate(config, "bounded_standardized_risk")
+        indices = grid.random_physical_indices(12, np.random.default_rng(23))
+        market = transform.to_market(grid.indices_to_points(indices))
+        np.testing.assert_allclose(
+            model.price_interpolation_floor(market),
+            model.reference_price(market),
+            rtol=1e-9,
+            atol=1e-9,
+        )
+
+    def test_the_oracle_floor_refuses_an_unaffordable_stencil(self):
+        config = VolatilityExtendedConfig()
+        model = VolExtendedPriceSurrogate(config, "m_uniform")
+        rng = np.random.default_rng(29)
+        market = sample_market_points(config, 2, rng)
+        with self.assertRaises(ValueError) as raised:
+            model.price_interpolation_floor(market, cubic_columns=range(13))
+        self.assertIn("max_stencil", str(raised.exception))
+
+    def test_a_fitted_surrogate_prices_puts_on_a_risk_grid(self):
+        config = VolatilityExtendedConfig()
+        model = VolExtendedPriceSurrogate(config, "price_adaptive")
+        model.fit(4_000, anova_samples=400, log=False)
+        rng = np.random.default_rng(31)
+        market = sample_market_points(config, 64, rng)
+        prices = model.price(market)
+        reference = model.reference_price(market)
+        self.assertEqual(prices.shape, reference.shape)
+        self.assertTrue(np.all(np.isfinite(prices)))
+        # a coarse budget, so this only asserts the wiring is not inverted
+        self.assertLess(
+            np.mean(np.abs(prices - reference)),
+            0.25 * float(np.mean(np.abs(reference))),
+        )
+
+    def test_price_accepts_a_single_market_vector(self):
+        config = VolatilityExtendedConfig()
+        model = VolExtendedPriceSurrogate(config, "m_uniform")
+        model.fit(4_000, anova_samples=400, log=False)
+        trade = np.zeros(config.n_dimensions)
+        trade[list(config.spot_columns)] = [100.0, 95.0, 105.0, 110.0, 90.0]
+        trade[list(config.volatility_columns)] = [0.20, 0.25, 0.18, 0.30, 0.22]
+        trade[config.strike_column] = 100.0
+        trade[config.rate_column] = 0.03
+        trade[config.maturity_column] = 1.0
+        self.assertEqual(model.price(trade).shape, (1,))
+        with self.assertRaises(ValueError):
+            model.price(trade[:-1])
+
+    def test_an_arithmetic_basket_uses_the_levy_pricer(self):
+        config = VolatilityExtendedConfig()
+        model = VolExtendedPriceSurrogate(
+            config, "bounded_standardized_risk", basket_kind="arithmetic"
+        )
+        rng = np.random.default_rng(37)
+        market = sample_market_points(config, 16, rng)
+        np.testing.assert_allclose(
+            model.reference_price(market),
+            EuropeanArithmeticBasketVolPricer(config)(market),
             rtol=1e-12,
         )
 

@@ -38,8 +38,8 @@ def gamma_monitor_axis(
     n_nodes: int,
     maturities: np.ndarray,
     rate: float,
-    basket_volatility: float,
-    basket_carry: float,
+    basket_volatility: float | np.ndarray,
+    basket_carry: float | np.ndarray,
     dense_nodes: int = 8193,
     smoothing_window: int = 41,
     floor: float = 0.02,
@@ -48,8 +48,16 @@ def gamma_monitor_axis(
 
     Cubic interpolation has a second-derivative error proportional to
     ``h**2 * |u''''|``.  The monitor therefore uses ``sqrt(|u''''|)`` as a
-    node-density proxy.  Each maturity is normalized before taking the
-    pointwise maximum so that short expiries do not erase longer regimes.
+    node-density proxy.  Each regime is normalized before taking the
+    pointwise maximum so that short expiries do not erase longer ones.
+
+    ``basket_volatility`` and ``basket_carry`` are scalars when the
+    volatility vector is frozen, as in the paper setup.  When volatility is
+    itself a sampled coordinate they may be arrays broadcast against
+    ``maturities``, so that a single axis serves every ``(T, sigma_B)``
+    regime the grid has to cover: the fourth derivative is sharpest in the
+    low-volatility, short-maturity corner, and an axis tuned to one regime
+    starves it.
     """
     if not lower < upper:
         raise ValueError("lower must be smaller than upper")
@@ -62,22 +70,27 @@ def gamma_monitor_axis(
     if floor <= 0.0:
         raise ValueError("floor must be positive")
 
-    maturities = np.asarray(maturities, dtype=float).reshape(-1)
+    maturities, volatilities, carries = np.broadcast_arrays(*(
+        np.asarray(value, dtype=float).reshape(-1)
+        for value in (maturities, basket_volatility, basket_carry)
+    ))
     if maturities.size == 0 or np.any(maturities <= 0.0):
         raise ValueError("maturities must be non-empty and positive")
+    if np.any(volatilities <= 0.0):
+        raise ValueError("basket volatilities must be positive")
 
     dense = np.linspace(float(lower), float(upper), int(dense_nodes))
     step = float(dense[1] - dense[0])
     window = min(int(smoothing_window), dense.size - (1 - dense.size % 2))
     signals = []
     fourth_derivative_scales = []
-    for maturity in maturities:
+    for maturity, volatility, carry in zip(maturities, volatilities, carries):
         values = geometric_basket_normalized_put(
             dense,
             float(maturity),
             float(rate),
-            float(basket_volatility),
-            float(basket_carry),
+            float(volatility),
+            float(carry),
         )
         fourth = savgol_filter(
             values,
@@ -108,6 +121,8 @@ def gamma_monitor_axis(
     return axis, {
         "definition": "equidistribution of floor + max_T normalized sqrt(abs(d4u/dm4))",
         "maturities": maturities.tolist(),
+        "basket_volatilities": volatilities.tolist(),
+        "basket_carries": carries.tolist(),
         "rate": float(rate),
         "dense_nodes": int(dense_nodes),
         "smoothing_window": int(window),

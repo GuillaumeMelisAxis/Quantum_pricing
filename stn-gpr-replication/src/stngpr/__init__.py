@@ -34,13 +34,24 @@ from .risk import (
 )
 from .scenarios import GBMScenarioGenerator
 from .vol_extension import (
+    VOL_GRID_MODES,
+    VOL_RISK_GRID_MODES,
+    BoundedVolStandardizedRiskTransform,
     InterleavedVolTransform,
+    VolExtendedPriceSurrogate,
+    VolStandardizedRiskTransform,
     build_vol_extended_grid,
+    build_vol_extended_risk_grid,
+    build_vol_grid,
     sample_market_points,
+    strike_axis_log_moneyness_nodes,
 )
 
 __all__ = [
+    "VOL_GRID_MODES",
+    "VOL_RISK_GRID_MODES",
     "BasketOptionTrade",
+    "BoundedVolStandardizedRiskTransform",
     "CoordinateTransform",
     "EuropeanArithmeticBasketVolPricer",
     "EuropeanGeometricBasketVolPricer",
@@ -52,10 +63,14 @@ __all__ = [
     "Portfolio",
     "ScenarioValuation",
     "VaRResult",
+    "VolExtendedPriceSurrogate",
+    "VolStandardizedRiskTransform",
     "VolatilityExtendedConfig",
     "arithmetic_basket_put_levy",
     "basket_put_monte_carlo",
     "build_vol_extended_grid",
+    "build_vol_extended_risk_grid",
+    "build_vol_grid",
     "compare_loss_distributions",
     "domain_coverage",
     "expected_shortfall_contributions",
@@ -69,6 +84,7 @@ __all__ = [
     "physical_log_moneyness_nodes",
     "project_symmetric_matrix_psd",
     "sample_market_points",
+    "strike_axis_log_moneyness_nodes",
     "var_es",
     "var_es_uncertainty",
 ]

@@ -36,7 +36,14 @@ clone. Core dependency is `teneva==0.14.11` (TT-cross); pin matters, its API mov
 - **`vol_extension.py`**: `InterleavedVolTransform` (market ↔ model coordinates,
   `u = log(sigma)`), `build_vol_extended_grid`, `BasketScaledModelPricer` (fits
   `P / basket_spot` instead of raw price — required at 13-D, see gotcha),
-  `resolve_cubic_columns` / `CUBIC_AXIS_NAMES` for cubic-axis selection.
+  `resolve_cubic_columns` / `CUBIC_AXIS_NAMES` for cubic-axis selection. Also
+  carries the colleague's Greek coordinate families lifted to 13-D:
+  `build_vol_extended_risk_grid` (`VOL_RISK_GRID_MODES`),
+  `VolStandardizedRiskTransform` / `BoundedVolStandardizedRiskTransform` (σ_B is
+  now per-row, not a config constant), and `build_vol_grid`, which dispatches to
+  either family by mode name. `VolExtendedPriceSurrogate` is the end-to-end
+  path — grid, transform, `P/G` scaling, TT-cross, cubic prediction — so
+  `.fit(budget)` then `.price(market_points)` prices on any of them.
 - **`tt_surrogate.py`**: `TTPriceSurrogate.predict_factorized(points,
   cubic_columns=...)` is the fast prediction path — contracts each mode's 2 (linear)
   or 4 (cubic) candidate index chains in place, `O(sum_j k_j q_j)` instead of the
@@ -77,7 +84,31 @@ heading rather than reading end to end.
    `(surrogate - Levy) + (Levy - reference)` before concluding the surrogate is
    bad; often the Levy term dominates. `EuropeanArithmeticBasketQMC` is the
    candidate fix, not yet substituted into the main comparison scripts.
-6. **`teneva.cross` is called without an `e`/`e_vld` tolerance** in `fit()` — it
+6. **The standardized-risk grids need a finer maturity axis than the config
+   default.** Their strike coordinate is a function of `(r, T, sigma)`, so a
+   fixed coordinate names a different strike at every maturity and the surface
+   moves along `T` far faster than on a moneyness grid — where the config only
+   spends 8 nodes. At a 150k budget on the default domain,
+   `bounded_standardized_risk` stalls at MAE 0.35 with `maturity_nodes=8` and
+   hits 0.0086 with 32, while `price_adaptive` is 0.0054 either way. The stall
+   is the grid's interpolation floor, not TT: effective rank keeps climbing
+   (11 → 23) while MAE sits still, and the multilinear oracle floor on that grid
+   is 0.30. Raise `maturity_nodes` before comparing coordinate families.
+7. **The unbounded `standardized_risk` mode cannot be built at 13-D.** One
+   global `z` interval must cover every `(r, T, sigma)` the other axes offer;
+   with sigma spanning 0.05–0.80 the envelope reaches `|z| ≈ 8.7`, and the
+   opposite corner of the box maps to `|log(K/G)| ≈ 2.6e3`, i.e. a strike that
+   is not a float. `build_vol_extended_risk_grid` raises with those numbers
+   rather than handing back a grid full of `inf`. It still builds on a narrow
+   volatility box; `bounded_standardized_risk` is the general answer.
+8. **The oracle interpolation floor cannot go fully cubic at 13-D.** It
+   enumerates the product stencil, so `2**13 = 8192` corners multilinear against
+   `4**13 = 67M` fully cubic (52 GiB). Only `TTPriceSurrogate.predict_factorized`
+   contracts mode by mode; `VolExtendedPriceSurrogate.price_interpolation_floor`
+   therefore defaults to multilinear and refuses stencils above `max_stencil`.
+   Do not compare a multilinear floor against a cubic TT error and call the gap
+   TT error.
+9. **`teneva.cross` is called without an `e`/`e_vld` tolerance** in `fit()` — it
    always runs to the requested budget (`stop: "m"` in diagnostics), so rank grows
    long after MAE has stopped improving. Not yet fixed; budget past ~100k
    evaluations on the 13-D problem is likely wasted, check the `effective_rank`
@@ -90,6 +121,10 @@ heading rather than reading end to end.
 - `scripts/validation/`: targeted comparisons — `compare_basket_layouts.py`,
   `compare_monte_carlo.py`, `compare_arithmetic_reference.py`,
   `validate_portfolio_var.py`, plus the colleague's Greeks validators.
+  `benchmark_vol_risk_grids.py` is the paper-grade accuracy/query-cost protocol
+  for the vol-extended risk grids (surrogate vs Monte Carlo vs the closed-form
+  oracle; profiles `smoke` ~3 min, `intermediate` ~20 min, `paper` ~2 h).
+  Protocol and threats to validity: `EXPERIMENTS.md` Stage 1d.
 - `results/*.json`: gitignored (`**/*.json`), not committed — regenerate from the
   scripts rather than expecting them to be present after a fresh clone.
 - `tests/test_core.py`: single test file, 83 tests, all classes.

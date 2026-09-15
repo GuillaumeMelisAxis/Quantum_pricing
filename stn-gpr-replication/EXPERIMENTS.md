@@ -562,6 +562,380 @@ cubic, -0.029 linear, on 7% of points). A `maximum(price, 0)` clip is exact for
 a put and can only reduce the error; it is deliberately not applied inside the
 surrogate, which reports the raw interpolant.
 
+## Stage 1d - Accuracy and query cost on the volatility-extended risk grids
+
+Runner: `scripts/validation/benchmark_vol_risk_grids.py`. Profiles `smoke`,
+`intermediate`, `paper`; every number below is regenerable from the JSON the
+runner writes, which carries its own provenance block (git commit, interpreter,
+library versions, CPU, thread environment).
+
+### Question
+
+The Greek coordinate grids of `risk_grids` were designed for Greek accuracy at
+a frozen volatility vector. Lifted to the 13-dimensional domain
+`(S_1, sigma_1, ..., S_5, sigma_5, K, r, T)` they are also *pricing* grids. Two
+things then need establishing, and neither is answered by a single error number:
+
+1. which strike coordinate prices best, at equal tensor shape and equal budget;
+2. whether the resulting surrogate is worth using at all, against the method a
+   desk would otherwise reach for - Monte Carlo.
+
+### Why the geometric basket
+
+The European geometric basket is the only member of the family with an exact
+closed form under GBM (`geometric_basket_put`). Every error reported here is
+therefore measured against truth, not against a reference that carries error of
+its own. That removes the usual decomposition
+`(method - reference) + (reference - truth)` entirely, and it is the reason this
+comparison is run on the geometric basket rather than the arithmetic one, where
+the best available reference is either Levy (~1.6% biased, gotcha 5) or a Monte
+Carlo estimate that is itself one of the methods under test.
+
+The price of that choice is stated rather than hidden: for this payoff the
+closed form is available, so the surrogate is not competing with Monte Carlo on
+merit - it is being *calibrated* against a case where the answer is known, so
+that its accuracy-cost profile can be trusted on payoffs where it is not. The
+closed form is timed alongside the other two routes to keep that visible.
+
+### Methods under test
+
+| route | implementation | error type | cost driver |
+| --- | --- | --- | --- |
+| oracle | `geometric_basket_put` | none (exact) | vectorized formula |
+| surrogate | QTT-cross on a risk grid, factorized cubic query | deterministic bias | rank and mode count |
+| Monte Carlo | `basket_put_monte_carlo`, terminal value, 5 correlated assets | stochastic, `O(N^-1/2)` | path count |
+
+Monte Carlo prices one contract per call and reuses no paths between contracts.
+The geometric basket admits a one-dimensional reduction that would make it much
+cheaper; the general five-asset engine is used deliberately, because it is the
+cost a payoff *without* a closed form would actually pay, and that is the
+setting the surrogate is meant for. Any desk implementation that shares paths
+across contracts with common `(r, T, sigma)` would narrow the gap reported in
+E3, and that is recorded as a threat to validity rather than argued away.
+
+### Design of the test set
+
+- `N_test` points drawn uniformly over the market box, sigma log-uniform to
+  match the grid coordinate. Drawing sigma uniformly would oversample the high
+  end, where the price is nearly linear in sigma and the problem is easy.
+- **One test set, shared by every method**, so every comparison is paired and no
+  difference can be an artefact of which contracts each method happened to draw.
+- The expensive arms (Monte Carlo, the oracle interpolation floor) run on a
+  **proportionally allocated stratified subset** over the moneyness x maturity
+  cells, so the subset's stratum weights match the full set's and the rare cells
+  - very short expiry, deep in the money - do not vanish.
+- Test seed is fixed and recorded. TT-cross chooses its own training nodes, so
+  there is no train/test leakage to control for; the test set never enters the
+  fit.
+
+### Metrics
+
+Primary metric is **MAE against the closed form**, as requested. MAE alone
+conflates bias and spread and is dominated by expensive contracts, so it is
+always reported beside:
+
+- normalized MAE (`MAE / mean|P|`), RMSE, median AE, p95 AE, max AE;
+- **mean signed error**, because the surrogate's error is almost entirely
+  systematic and Monte Carlo's is not - two methods can share a MAE and behave
+  completely differently under bump-and-revalue;
+- a **percentile bootstrap 95% interval on the MAE itself** (resamples over test
+  points). Two methods whose intervals overlap have not been separated by this
+  test set, however many digits their point estimates differ in;
+- per-stratum MAE over moneyness, maturity and basket volatility.
+
+### Statistical treatment
+
+- **Replication.** Monte Carlo is re-run over independent seeds and the TT fit
+  over independent ANOVA/cross seeds; MAE is reported as mean with the standard
+  error over seeds. A single-seed MAE for a stochastic method is not a result.
+- **Paired significance.** Wilcoxon signed-rank on the per-contract absolute
+  errors of the two methods on the shared subset, plus the fraction of contracts
+  on which each wins. The paired design is what makes this legitimate.
+- **Monte Carlo calibration.** Realized coverage of the `1.96 x` reported
+  standard error, overall and by moneyness. This checks the Monte Carlo arm's
+  own uncertainty estimates rather than assuming them.
+- **Revaluation noise.** Standard deviation of the same contract's price across
+  independent Monte Carlo replications. This is the quantity that survives every
+  accuracy comparison, and it is exactly zero for the surrogate.
+
+### Timing protocol
+
+Reproducible timing is a design problem, not a `perf_counter` call:
+
+- BLAS thread count pinned to one **before numpy imports**, and the thread
+  environment recorded. A per-query cost that silently depends on core count is
+  not a reproducible number.
+- Warm-up runs discarded, then `R` repetitions; the **median** is reported, with
+  the IQR. The mean is the wrong statistic here: a competing process can only
+  make a run slower, so the distribution has a hard floor and a long right tail.
+- Two regimes, because they answer different questions: **batch throughput**
+  (whole test set in one call, the risk-run case) and **single-contract
+  latency** (one call per contract, the pricing-request case).
+- Training cost is reported separately and never amortized into the query cost.
+- **Run it on a quiet machine.** Median-of-repeats absorbs a brief spike, not
+  sustained competition: running the `intermediate` profile beside a test suite
+  moved one E1 query cost from 2.9e-4 to 5.3e-4 s, an 80% inflation with nothing
+  in the method changed. Timings from a loaded machine are not wrong so much as
+  meaningless, and no amount of post-hoc statistics repairs them.
+
+### E1 - Coordinate ablation
+
+Four coordinate families - `m_uniform`, `price_adaptive`, `gamma_monitor`,
+`bounded_standardized_risk` - at **identical tensor shape and identical budget**,
+so the only difference is where the strike nodes sit. The unbounded
+`standardized_risk` mode is excluded because it is not representable at 13-D
+(gotcha 7); the runner would raise rather than silently produce a grid of
+infinities.
+
+Crossed with `maturity_nodes` in `{8, 32}`. This is a factor of the design, not
+a detail: the standardized coordinate is a function of `(r, T, sigma)`, so a
+fixed coordinate names a different strike at every maturity and the surface
+moves along `T` far faster than on a moneyness grid (gotcha 6). Comparing
+coordinate families at a single maturity resolution measures the interaction,
+not the coordinate.
+
+Note that the two maturity settings are *not* equal-shape: 32 nodes is 5 QTT
+cores against 3. Modes are compared at equal shape within each setting.
+
+### E2 - Error decomposition
+
+The surrogate's error has two sources: the grid cannot represent the surface
+exactly, and TT-cross does not fit the grid exactly. The oracle interpolation
+floor - the same interpolant on the same grid, evaluated against the exact
+pricer instead of the fitted cores - isolates the first.
+
+One caveat is structural, and rather than being waved through it is measured
+around. The surrogate is queried cubically on all thirteen axes; the floor
+cannot be, because an oracle has no cores to contract mode by mode and must
+enumerate the product stencil - `4**13 = 67M` corners per query against
+`2**13 = 8192` (gotcha 8). The floor is therefore evaluated at a **ladder** of
+interpolation orders that *are* affordable - multilinear, cubic on `m`, cubic on
+`m` and `T` - which brackets the unreachable all-cubic floor from above.
+
+Two consequences are stated in the output rather than left for a reader to trip
+over. The gap between the richest floor and the surrogate **bounds** cross error
+rather than isolating it. And a surrogate scoring *below* the richest floor is
+not beating its own grid - it is reporting the eleven cubic axes the floor could
+not afford.
+
+### E3 - Accuracy-cost frontier against Monte Carlo
+
+The headline experiment. Comparing the two methods at one arbitrary path count
+is meaningless - Monte Carlo's accuracy is a dial and the surrogate's is not -
+so both are measured as frontiers:
+
+- Monte Carlo at path counts spanning `2^12` to `2^20`;
+- the surrogate at TT-cross budgets spanning `2e4` to `5e5`.
+
+From those, three derived quantities:
+
+1. **Matched accuracy.** The path count `N*` at which Monte Carlo reaches the
+   surrogate's MAE, from the fitted `N^-1/2` law, and the cost there from the
+   fitted linear cost model. `N*` is generally larger than any arm that was
+   actually run, so this is an **extrapolation** and the output says so
+   explicitly, including whether `N*` lies outside the measured range. The
+   measured comparison at the largest path count actually executed is reported
+   alongside, so there is a non-extrapolated headline too.
+2. **Speedup at matched accuracy**, `t_MC(N*) / t_TT`.
+3. **Break-even query count**, `Q* = T_train / (t_MC(N*) - t_TT)`: the number of
+   queries after which building the surrogate has paid for itself. Reported as
+   `null` when the surrogate is slower at matched accuracy, which does happen at
+   low budgets and is not hidden.
+
+Because the surrogate here is trained on closed-form labels, `T_train` is a
+**lower bound** on what it would cost for a payoff needing simulated labels;
+break-even scales with that, and the write-up must say so.
+
+### E4 - Scaling laws
+
+The extrapolation in E3 is only as good as the laws behind it, so all three are
+verified rather than assumed:
+
+- Monte Carlo error against paths: log-log fit, exponent expected `-0.5`;
+- Monte Carlo cost against paths: linear fit, `t = fixed + marginal * N`;
+- surrogate query cost against training budget, and against the effective rank
+  that the budget buys.
+
+The third of these corrects an assumption worth recording, because it was wrong
+and the data caught it. Surrogate query cost is *not* flat in the training
+budget: a larger budget buys rank, contraction costs `O(sum_j k_j q_j r^2)` in
+the bond rank, and the measured cost rises by a factor of 2.5 from a 20k budget
+to a 150k one. Reporting it as flat would have been a claim the same run
+refuted.
+
+The real asymmetry is not that surrogate query cost is constant. It is the
+**accuracy-cost elasticity**, `d log(cost) / d log(1/error)` - what each method
+pays for one more digit:
+
+- Monte Carlo: error falls as `N^-1/2` while cost rises as `N`, so cost scales
+  as `error^-2`. Elasticity 2, i.e. **4x the query cost to halve the error**.
+- the surrogate: cost rises only through rank, and rank grows slowly in budget.
+
+The ratio of those two exponents, not any single MAE, is what decides whether
+a surrogate is worth building - and unlike a MAE it is a property of the two
+methods rather than of the test set they were scored on.
+
+One statistical caution is carried in the output: the regression standard error
+on the MC exponent measures how straight the line is, across a handful of path
+counts on a near-exact fit. It is not an honest uncertainty on the exponent, and
+with `R^2 > 0.999` a strict interval will exclude `-0.5` for reasons that have
+nothing to do with the physics. The raw deviation from `-0.5` is reported so the
+fit is not over-read as a hypothesis test.
+
+### E5 - Stratified accuracy and determinism
+
+Where each method's error lives, over the three stratifications. The two
+methods fail in different regions - Monte Carlo error tracks payoff variance,
+the surrogate's tracks surface curvature - and a single global MAE hides that
+completely. Closes with the paired significance test and the revaluation-noise
+comparison.
+
+### Results, `intermediate` profile
+
+1,000 test points, 150-point stratified paired subset, mean absolute reference
+price 42.68. Monte Carlo replicated over 3 seeds, TT over 1. Frontier grid
+`price_adaptive`, `maturity_nodes=32`. Timings from a dedicated quiet run
+(`results/vol_risk_grid_frontier_quiet.json`); the E1/E2 MAEs below come from
+the full run and are timing-independent.
+
+**E1 - coordinate ablation, MAE at 60k budget.** Equal shape within each
+maturity column.
+
+| coordinate | `maturity_nodes=8` | `maturity_nodes=32` |
+| --- | --- | --- |
+| `m_uniform` | 0.0222 | **0.0188** |
+| `price_adaptive` | 0.0223 | 0.0238 |
+| `gamma_monitor` | 0.0275 | 0.0209 |
+| `bounded_standardized_risk` | 0.3130 | 0.0276 |
+
+At eight maturity nodes the three moneyness coordinates are within 25% of each
+other and the standardized one is **14x worse**. At thirty-two they are all
+within 50%, and the standardized coordinate improves **11x**. That interaction
+is the result: at a single maturity resolution this table would have read as
+"the standardized coordinate is unusable for pricing", which is not true - what
+is true is that its strike coordinate depends on `T`, so it cannot be judged on
+a maturity axis sized for coordinates that do not (gotcha 6).
+
+**E2 - error decomposition, `maturity_nodes=32`, 150 points.** The floor ladder
+brackets the all-cubic floor the oracle cannot afford.
+
+| coordinate | floor, multilinear | floor, cubic `m` | floor, cubic `m,T` | TT, cubic all 13 |
+| --- | --- | --- | --- | --- |
+| `m_uniform` | 0.2221 | 0.0429 | 0.0427 | 0.0223 |
+| `price_adaptive` | 0.1086 | 0.0318 | 0.0317 | 0.0233 |
+| `gamma_monitor` | 0.2453 | 0.0302 | 0.0301 | 0.0218 |
+| `bounded_standardized_risk` | 0.2457 | 0.0578 | 0.0641 | 0.0268 |
+
+Interpolation order, not TT-cross, dominates: going multilinear to cubic on `m`
+alone cuts the floor by 3-8x, while adding `T` changes almost nothing. The TT
+number sits *below* the richest affordable floor because it is cubic on eleven
+more axes - it is not beating its own grid, and the output says so.
+
+**E3 - against Monte Carlo.** The measured comparison, no extrapolation:
+
+| method | MAE | s/query | note |
+| --- | --- | --- | --- |
+| closed form (oracle) | 0 | 4.9e-07 | exact; 700x faster than the surrogate |
+| **QTT, 150k budget** | **0.0052** | **3.5e-04** | 41 s build |
+| QTT, 60k budget | 0.0264 | 3.5e-04 | 22 s build |
+| QTT, 20k budget | 0.1386 | 1.4e-04 | 16 s build |
+| Monte Carlo, 262,144 paths | 0.0134 | 1.4e-01 | |
+| Monte Carlo, 65,536 paths | 0.0277 | 3.7e-02 | |
+| Monte Carlo, 16,384 paths | 0.0516 | 6.6e-03 | |
+| Monte Carlo, 4,096 paths | 0.1077 | 8.0e-04 | |
+
+At the largest path count actually run, the surrogate is **2.6x more accurate
+and 400x faster**. That is a dominance result and needs no extrapolation.
+Extrapolating the fitted laws, matching the surrogate's MAE needs **1.77M
+paths** at 0.95 s/query - a **2,700x** speedup - and the 41 s build amortizes
+after **43 queries**.
+
+The closed-form row is the honest control: for *this* payoff an analytic formula
+is 700x faster than the surrogate, so nothing here argues for a surrogate on a
+geometric basket. The geometric basket is the calibration vehicle, because it is
+the only case where MAE can be measured against truth. The claim being supported
+is about the surrogate's accuracy-cost profile, which transfers to payoffs with
+no closed form; the specific speedup number does not.
+
+**E4 - scaling laws.**
+
+| law | fitted | theory | `R^2` |
+| --- | --- | --- | --- |
+| MC error vs paths | `N^-0.4956`, CI `[-0.518, -0.474]` | `N^-0.5` | 0.9990 |
+| MC cost vs paths | linear, 5.4e-07 s/path | linear | 0.9992 |
+| TT query cost vs rank | `r^1.29` | `r^1` to `r^2` | 0.816 |
+
+And the number the comparison reduces to, the **accuracy-cost elasticity**
+`d log(cost) / d log(1/error)`:
+
+| method | elasticity | cost multiplier to halve the error |
+| --- | --- | --- |
+| Monte Carlo | 2.50 +- 0.19 | **5.7x** |
+| QTT surrogate | 0.29 +- 0.17 | **1.2x** |
+
+Monte Carlo's measured elasticity is *worse* than its theoretical 2.0, and the
+reason is visible in the raw costs: per-path cost is not constant, rising from
+1.95e-07 s/path at 4,096 paths to 5.3e-07 at 262,144, a 2.7x rise, as the
+working set leaves cache. Theory says 4x the cost per halving; this machine charges 5.7x.
+
+This is the finding that survives the choice of payoff. A surrogate is not worth
+building because it is fast at some accuracy - it is worth building because
+buying a digit costs it 1.2x and costs Monte Carlo 5.7x, so the gap widens
+without bound as the accuracy target tightens.
+
+**E5 - where the error lives, and determinism.**
+
+Against 262,144-path Monte Carlo on the paired subset, the surrogate is more
+accurate on only **56%** of contracts (Wilcoxon `p = 3.7e-04`) while carrying
+**2.6x** the lower MAE. Both facts are true and neither alone is the story:
+Monte Carlo error scales with payoff volatility, so it is small on cheap
+contracts and large on expensive ones, while the surrogate's is bounded by grid
+resolution. The surrogate wins narrowly on a slim majority of contracts and
+wins heavily in the tail.
+
+**Monte Carlo's own error bars undercover, and not uniformly.** Realized
+coverage of the nominal 95% interval:
+
+| stratum | count | coverage |
+| --- | --- | --- |
+| deep OTM | 37 | **0.59** |
+| OTM | 7 | 1.00 |
+| ATM | 6 | 0.83 |
+| ITM | 10 | 1.00 |
+| deep ITM | 90 | 0.94 |
+
+Deep out of the money the put payoff is zero on almost every path, so the
+estimator is far from normal at these path counts and the normal interval is
+not valid there. Deep in the money, where the payoff is nearly deterministic,
+coverage is textbook. This vindicates a design decision that would otherwise
+look like belt-and-braces: scoring every method against the exact closed form
+rather than against Monte Carlo with error bars, because in exactly the region
+where a basket put is cheapest those error bars are not trustworthy.
+
+Finally, **revaluation noise**: the same contract repriced under independent
+Monte Carlo seeds at 262,144 paths moves with a standard deviation of 0.0152
+(max 0.066). The surrogate returns bit-identical prices across calls, asserted
+in the run. This is why an accuracy comparison on price alone understates the
+gap for bump-and-revalue Greeks, where a fresh draw of that noise lands in the
+numerator of a finite difference.
+
+### Threats to validity, stated up front
+
+1. Monte Carlo reuses no paths across contracts. A shared-path implementation
+   would narrow the E3 gap for contracts sharing `(r, T, sigma)`.
+2. The surrogate is trained on closed-form labels, so its training cost is a
+   lower bound for payoffs that need simulated labels.
+3. The geometric basket admits a 1-D reduction that the general engine does not
+   exploit; the general engine is the point, but the number is not a claim about
+   the cheapest possible geometric-basket Monte Carlo.
+4. Matched-accuracy figures are extrapolated from fitted laws, flagged as such.
+5. Both interpolants can return small negative prices deep out of the money. A
+   `maximum(price, 0)` clip is exact for a put and can only reduce error; it is
+   deliberately not applied, and the negative fraction and worst value are
+   reported instead.
+6. Timings are single-machine and single-threaded. They compare methods on one
+   machine; they are not absolute performance claims.
+
 ## Stage 2 - Greeks
 
 The trusted and surrogate pricers are bumped with identical central-difference
