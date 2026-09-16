@@ -1,3 +1,5 @@
 **/*.pdf
 **/*.png
 **/*.npz
+!experiments/**/*.csv
+!experiments/**/*.pdf

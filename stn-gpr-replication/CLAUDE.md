@@ -13,7 +13,7 @@ moving — re-check `git log` before assuming a symbol's shape from this file al
 ## Environment
 
 ```bash
-.venv/Scripts/python.exe -m pytest -q        # 83 tests, ~10s
+.venv/Scripts/python.exe -m pytest -q        # 127 tests, ~30s
 .venv/Scripts/python.exe -m ruff check src scripts tests
 ```
 
@@ -49,6 +49,21 @@ clone. Core dependency is `teneva==0.14.11` (TT-cross); pin matters, its API mov
   or 4 (cubic) candidate index chains in place, `O(sum_j k_j q_j)` instead of the
   corner stencil's `O(prod_j k_j)`. Always prefer it over `predict`/
   `predict_hybrid_cubic` except when explicitly cross-checking correctness.
+
+- **`sigma_axes.py` / `sigma_surrogate.py`**: the *additive* volatility axes, added
+  for the dimensional-cost experiment. `SigmaAugmentedConfig` takes an independent
+  `n_sigma_axes` (`d_sigma`, 0..n_assets) instead of pinning one sigma per asset,
+  and its `sigma_block="tail"` layout appends the sigma axes *after* the shared
+  `(S_1..S_n, K, r, T)`, so the `d_sigma=0` QTT chain is exactly the `d_sigma=k`
+  chain minus the sigma cores. That is what `vol_extension` cannot do: neither of
+  its layouts puts the sigma block at the chain tail, so its rank profiles are not
+  comparable core by core across dimension counts. `SigmaAugmentedSurrogate`
+  always fits `P/G` and *refuses* post-fit SVD truncation rather than defaulting
+  it off. `spot_collapsed_interpolation_floor` computes the cubic-on-every-axis
+  interpolation floor at 13-D, which the `vol_extension` path cannot (gotcha 8):
+  `P/G` is spot-free on these coordinates and Lagrange weights sum to one per
+  axis, so the spot stencil collapses exactly, `4**13` -> `4**8`. The identity is
+  re-measured at run time on a subsample, not assumed.
 
 Detailed experiment protocol and results: `EXPERIMENTS.md`. Version-by-version
 narrative and exact commands: `README.md`. Both are large — grep for a stage/version
@@ -108,6 +123,16 @@ heading rather than reading end to end.
    therefore defaults to multilinear and refuses stencils above `max_stencil`.
    Do not compare a multilinear floor against a cubic TT error and call the gap
    TT error.
+10. **`d_sigma` and mode order are not free in `vol_extension`, and that is a
+    protocol trap.** `VolatilityExtendedConfig` is pinned at `2n+3` dimensions,
+    and both its layouts put the sigma block *before* `(K, r, T)`. Any experiment
+    that varies the number of volatility factors, or that wants to align rank
+    profiles core by core against the 8-D chain, needs `sigma_axes.py` instead.
+    Related: the 8-D path in `compare_pricing_risk_grids.py` fits the raw price
+    `P` while `VolExtendedPriceSurrogate` fits `P/G` - comparing the two directly
+    mixes a dimension effect with a target effect (see gotcha 1 for how large
+    that is). `sigma_surrogate.py` fits `P/G` at every `d_sigma` for this reason.
+
 9. **`teneva.cross` is called without an `e`/`e_vld` tolerance** in `fit()` — it
    always runs to the requested budget (`stop: "m"` in diagnostics), so rank grows
    long after MAE has stopped improving. Not yet fixed; budget past ~100k
@@ -127,4 +152,10 @@ heading rather than reading end to end.
   Protocol and threats to validity: `EXPERIMENTS.md` Stage 1d.
 - `results/*.json`: gitignored (`**/*.json`), not committed — regenerate from the
   scripts rather than expecting them to be present after a fresh clone.
-- `tests/test_core.py`: single test file, 83 tests, all classes.
+- `scripts/experiments/`: the dimensional-cost protocol, phase by phase
+  (`common.py` holds every frozen parameter and the run manifest; `measure.py`
+  defines what is recorded per fit). Outputs land in `experiments/`, which the
+  local `.gitignore` re-includes for `.csv` and `.pdf` against the repo-root
+  ignore rules.
+- `tests/test_core.py`: 104 tests, all classes. `tests/test_sigma_axes.py`: the
+  additivity and reduced-floor-equivalence tests for `sigma_axes.py`.
