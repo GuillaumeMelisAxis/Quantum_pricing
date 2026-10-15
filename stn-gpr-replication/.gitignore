@@ -1,5 +1,36 @@
+# The repository root ignores **/*.json, **/*.csv, **/*.png and **/*.txt.
+# The rules below re-include what is needed to reproduce and compile the paper.
+
+# Tooling
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Regenerable caches (TT cores, LSMC labels)
+*.npz
+results/**/cache/
+
+# Smoke runs of reproduce_paper.py
+results_smoke/
+
+# LaTeX build products
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
+paper/*.pdf
+
+# Generated images are ignored, except the paper's own figures
 **/*.pdf
 **/*.png
-**/*.npz
-!experiments/**/*.csv
-!experiments/**/*.pdf
+!paper/figures/**/*.pdf
+!paper/figures/**/*.png
+!results/**/*.pdf
+
+# Experiment outputs that the paper reports
+!results/**/*.json
+!results/**/*.csv
+!requirements-lock.txt

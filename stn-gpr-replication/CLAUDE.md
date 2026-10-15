@@ -65,9 +65,11 @@ clone. Core dependency is `teneva==0.14.11` (TT-cross); pin matters, its API mov
   axis, so the spot stencil collapses exactly, `4**13` -> `4**8`. The identity is
   re-measured at run time on a subsample, not assumed.
 
-Detailed experiment protocol and results: `EXPERIMENTS.md`. Version-by-version
-narrative and exact commands: `README.md`. Both are large — grep for a stage/version
-heading rather than reading end to end.
+Detailed experiment protocol and results: `archive/docs/EXPERIMENTS.md`.
+Version-by-version narrative and exact commands:
+`archive/docs/README_development_history.md`. Both are large — grep for a
+stage/version heading rather than reading end to end. Their paths predate the
+October 2026 reorganization (see "Where things live").
 
 ## Non-obvious gotchas (learned the hard way this session)
 
@@ -180,8 +182,8 @@ heading rather than reading end to end.
     converges, risk oscillates; MC: price oscillates, risk converges. Neither
     price error predicts the risk error. Consequence: the cheap, reference-free stopping criterion
     (global fit norm) does not flag the bad budgets, so the budget must be swept
-    against the risk metric itself. `rapport_var_qtt_panier_otm13d.md` section
-    4.3 and `experiments/figures/var_qtt_versus_monte_carlo.pdf`.
+    against the risk metric itself. `archive/docs/rapport_var_qtt_panier_otm13d.md`
+    section 4.3 and `archive/results/figures/var_qtt_versus_monte_carlo.pdf`.
 
 11. **A put-only surrogate prices geometric-basket calls for free, exactly.**
     `C - P = e^{-rT}(F - K)` with `F = G_0 exp(carry T)` is model-exact and
@@ -203,26 +205,36 @@ heading rather than reading end to end.
 
 ## Where things live
 
-- `scripts/reproduce_european.py` / `reproduce_european_vol.py`: main experiment
-  entry points (8-D paper reproduction / 13-D volatility extension).
-- `scripts/validation/`: targeted comparisons — `compare_basket_layouts.py`,
-  `compare_monte_carlo.py`, `compare_arithmetic_reference.py`,
-  `validate_portfolio_var.py`, plus the colleague's Greeks validators.
-  `benchmark_var_qtt_basket_book.py` is the one-day VaR protocol on a 6-option
-  call/put book over five synthetic stocks: closed form vs nested Monte Carlo
-  vs put-only QTT lifted by parity, all on shared scenarios, with both
-  accuracy/cost curves measured in one process. Results and threats to
-  validity: `rapport_var_qtt_panier.md`.
-  `benchmark_vol_risk_grids.py` is the paper-grade accuracy/query-cost protocol
-  for the vol-extended risk grids (surrogate vs Monte Carlo vs the closed-form
-  oracle; profiles `smoke` ~3 min, `intermediate` ~20 min, `paper` ~2 h).
-  Protocol and threats to validity: `EXPERIMENTS.md` Stage 1d.
-- `results/*.json`: gitignored (`**/*.json`), not committed — regenerate from the
-  scripts rather than expecting them to be present after a fresh clone.
-- `scripts/experiments/`: the dimensional-cost protocol, phase by phase
-  (`common.py` holds every frozen parameter and the run manifest; `measure.py`
-  defines what is recorded per fit). Outputs land in `experiments/`, which the
-  local `.gitignore` re-includes for `.csv` and `.pdf` against the repo-root
-  ignore rules.
-- `tests/test_core.py`: 104 tests, all classes. `tests/test_sigma_axes.py`: the
+Reorganized in October 2026 around the final manuscript `paper/rapport_final.tex`:
+only what the paper uses is at the top level, everything else is in `archive/`.
+
+- `reproduce_paper.py`: single entry point; holds the exact settings of every
+  published run (`--list`, `--smoke`, `--only NAME`, `--dry-run`). Most
+  published runs used profile `intermediate`, not the scripts' `paper` profile.
+- `experiments/NN_<name>/`: one folder per paper experiment (00 method
+  illustrations, 01 node placement, 02 European, 03 American, 04 Greeks,
+  05 volatility cost, 06 query benchmark, 07 VaR/ES). Scripts are run as files
+  from the project root; sibling imports (e.g. the Greek helpers in
+  `04_greeks/`, `common.py` in `05_volatility_cost/`) rely on the script's own
+  folder being on `sys.path`. Folder names start with digits, so tests load
+  them with `importlib` (see `tests/test_v992_geometry.py`).
+- `results/NN_<name>/`: outputs, same names. The local `.gitignore` re-includes
+  `results/**/*.json` and `*.csv` against the repo-root ignore rules; caches
+  (`results/**/cache/`, `*.npz`) stay ignored, except the already-tracked
+  American LSMC label cache.
+- `paper/figures/`: figures at the exact paths `\includegraphics` uses; the
+  plotting scripts default to writing there.
+- `experiments/07_var_es/benchmark_var_qtt_basket_book.py` is the one-day VaR
+  protocol on a 6-option call/put book over five synthetic stocks: closed form
+  vs nested Monte Carlo vs put-only QTT lifted by parity, all on shared
+  scenarios. `experiments/06_query_benchmark/benchmark_vol_risk_grids.py` is
+  the accuracy/query-cost protocol for the vol-extended grids (profiles
+  `smoke` ~3 min, `intermediate` ~20 min, `paper` ~2 h).
+- `experiments/05_volatility_cost/`: the dimensional-cost protocol, phase by
+  phase (`common.py` holds every frozen parameter and the run manifest;
+  `measure.py` defines what is recorded per fit).
+- `archive/scripts/`: exploratory scripts (13-D driver `reproduce_european_vol.py`,
+  layout / Monte Carlo / arithmetic comparisons, Greek ablations). Some need
+  `PYTHONPATH=experiments/04_greeks`.
+- `tests/test_core.py`: core tests, all classes. `tests/test_sigma_axes.py`: the
   additivity and reduced-floor-equivalence tests for `sigma_axes.py`.

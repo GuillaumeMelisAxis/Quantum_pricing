@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+import importlib.util
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 
-from scripts.validation.analyze_grid_node_redistribution_v992 import (
-    GRID_MODES,
-    _aggregate,
-    _scenario,
-)
 from stngpr.config import PaperConfig
 from stngpr.risk_grids import build_greek_coordinate_grid
+
+# The experiment scripts live in folders named after the paper sections
+# (``01_node_placement``), which are not importable package names.
+_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "experiments"
+    / "01_node_placement"
+    / "analyze_grid_node_redistribution_v992.py"
+)
+_spec = importlib.util.spec_from_file_location("node_placement_v992", _SCRIPT)
+_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_module)
+GRID_MODES = _module.GRID_MODES
+_aggregate = _module._aggregate
+_scenario = _module._scenario
 
 
 class V992GeometryTests(unittest.TestCase):
