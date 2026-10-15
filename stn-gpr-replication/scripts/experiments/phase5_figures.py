@@ -444,7 +444,10 @@ def figure_dimensional_slope(aggregate_rows, out_dir: Path, name: str):
     series(axes[0], "effective_rank", "global effective rank", measure_paid)
     axes[0].set_ylabel("rank")
     axes[0].set_xlabel(r"$d_\sigma$")
-    axes[0].legend(loc="upper left", handlelength=2.6)
+    # Both rank curves run along the top of this panel once the budget is large
+    # enough to resolve every configuration, so the legend cannot live there.
+    axes[0].legend(loc="lower right", handlelength=2.6)
+    axes[0].margins(y=0.10)
 
     style_axes(axes[1], log_y=True)
     series(axes[1], "tt_parameters", "TT parameters", measure_paid, log=True)
@@ -469,14 +472,21 @@ def figure_dimensional_slope(aggregate_rows, out_dir: Path, name: str):
 # --------------------------------------------------------------------------
 
 
-def figure_sigma_cell(cell_rows, floor_rows, sigma_ref, out_dir: Path, name: str):
-    """Supporting figure for the phase-1 node-placement decision.
+def figure_sigma_cell(cell_rows, floor_rows, sigma_ref, out_dir: Path, name: str,
+                      axis_nodes=None, width=None):
+    """NMAE against volatility, with the sigma-axis grid nodes marked.
 
-    NMAE across one whole volatility cell, node to node, with ``sigma_ref``
-    marked. It answers one question: is the reported value at ``sigma_ref`` a
-    local minimum, or an ordinary point of the cell?
+    Over a single cell this answers the phase-1 node-placement question: is the
+    value at ``sigma_ref`` a local minimum, or an ordinary point of the cell?
+    Over several cells it shows the scallop directly - the interpolation floor
+    dipping at every node and peaking between them - which is the same statement
+    made visible rather than inferred from one arch.
+
+    ``axis_nodes`` are drawn as thin verticals. Passing them explicitly matters
+    once the range spans more than one cell: the endpoints of the sampled range
+    are then no longer nodes, so they cannot stand in for them.
     """
-    fig, axis = plt.subplots(figsize=(COLUMN_WIDTH, 2.3))
+    fig, axis = plt.subplots(figsize=(width or COLUMN_WIDTH, 2.3))
     style_axes(axis, log_y=True)
 
     by_sigma = defaultdict(list)
@@ -518,11 +528,16 @@ def figure_sigma_cell(cell_rows, floor_rows, sigma_ref, out_dir: Path, name: str
         fontsize=7.5,
         zorder=6,
     )
-    for edge in (sigmas[0], sigmas[-1]):
-        axis.axvline(edge, color=MUTED, linewidth=0.6, zorder=2)
+    nodes = (
+        np.asarray(axis_nodes, dtype=float)
+        if axis_nodes is not None
+        else np.asarray([sigmas[0], sigmas[-1]], dtype=float)
+    )
+    for node in nodes:
+        axis.axvline(node, color=MUTED, linewidth=0.6, zorder=2)
 
     axis.set_xlabel(
-        r"$\sigma$ (all five assets); cell edges are grid nodes"
+        r"$\sigma$ (all five assets); thin verticals are $\sigma$-axis nodes"
     )
     axis.set_ylabel("NMAE")
     # Twenty sample points across a cell of width ~0.018 would print twenty
@@ -550,6 +565,19 @@ def main() -> int:
     parser.add_argument("--input-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR / "figures")
     parser.add_argument("--sigma-ref", type=float, default=0.20)
+    parser.add_argument(
+        "--figure1-only",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="D_SIGMA",
+        help=(
+            "restrict figure 1 to these d_sigma values and write it under a "
+            "suffixed name, leaving the full-sweep figure untouched. Filters "
+            "rows that were already measured; nothing is refitted, and the "
+            "curves are identical to the corresponding ones in the full figure."
+        ),
+    )
     args = parser.parse_args()
 
     source, out_dir = Path(args.input_dir), Path(args.output_dir)
@@ -560,7 +588,20 @@ def main() -> int:
     aggregate = read_csv(source / f"{args.tag}_agrege.csv")
 
     written = []
-    written += figure_statistical_cost(results, out_dir, "figure1_statistical_cost")
+    if args.figure1_only:
+        kept = {int(value) for value in args.figure1_only}
+        subset = [row for row in results if int(row["d_sigma"]) in kept]
+        missing = kept - {int(row["d_sigma"]) for row in subset}
+        if missing:
+            raise SystemExit(f"no rows for d_sigma={sorted(missing)} in {args.tag}")
+        suffix = "_".join(f"d{value}" for value in sorted(kept))
+        written += figure_statistical_cost(
+            subset, out_dir, f"figure1_statistical_cost_{suffix}"
+        )
+    else:
+        written += figure_statistical_cost(
+            results, out_dir, "figure1_statistical_cost"
+        )
     written += figure_rank_profile(ranks, results, out_dir, "figure2_rank_profile")
     written += figure_dimensional_slope(
         aggregate, out_dir, "figure3_dimensional_slope"

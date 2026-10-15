@@ -54,10 +54,14 @@ from stngpr.pricers import (
     AmericanArithmeticBasketLSMC,
     EuropeanArithmeticBasketQMC,
     EuropeanArithmeticBasketVolPricer,
+    EuropeanGeometricBasketCallPricer,
     EuropeanGeometricBasketPricer,
     EuropeanGeometricBasketVolPricer,
     arithmetic_basket_put_levy,
     basket_put_monte_carlo,
+    geometric_basket_call,
+    geometric_basket_moments,
+    geometric_basket_parity_offset,
     geometric_basket_put,
 )
 from stngpr.risk import (
@@ -410,6 +414,102 @@ class GridTests(unittest.TestCase):
             axes.append(grid.axes[base.n_assets])
         np.testing.assert_array_equal(axes[0], axes[1])
         np.testing.assert_array_equal(axes[1], axes[2])
+
+
+class GeometricBasketParityTests(unittest.TestCase):
+    """The parity offset is what lets a put-only surrogate price calls."""
+
+    @staticmethod
+    def _market():
+        config = PaperConfig(
+            volatilities=np.array([0.18, 0.22, 0.25, 0.30, 0.20]),
+        )
+        spots = np.array([
+            [95.0, 100.0, 105.0, 90.0, 110.0],
+            [60.0, 140.0, 100.0, 80.0, 120.0],
+            [20.0, 25.0, 30.0, 22.0, 28.0],
+        ])
+        strikes = np.array([80.0, 120.0, 25.0])
+        rates = np.array([0.03, 0.005, 0.08])
+        maturities = np.array([1.0, 0.25, 3.0])
+        return config, spots, strikes, rates, maturities
+
+    def test_call_minus_put_equals_discounted_forward_minus_strike(self):
+        config, spots, strikes, rates, maturities = self._market()
+        put = geometric_basket_put(
+            spots, strikes, rates, maturities,
+            config.volatilities, config.correlation, config.dividends,
+        )
+        call = geometric_basket_call(
+            spots, strikes, rates, maturities,
+            config.volatilities, config.correlation, config.dividends,
+        )
+        offset = geometric_basket_parity_offset(
+            spots, strikes, rates, maturities,
+            config.volatilities, config.correlation, config.dividends,
+        )
+        np.testing.assert_allclose(call - put, offset, rtol=0.0, atol=1e-11)
+
+    def test_one_asset_call_reduces_to_black_scholes(self):
+        price = geometric_basket_call(
+            [[100.0]], [100.0], [0.05], [1.0], np.array([0.2]), np.eye(1)
+        )[0]
+        self.assertAlmostEqual(price, 10.450584, places=5)
+
+    def test_forward_matches_simulated_basket_expectation(self):
+        config, spots, _strikes, rates, maturities = self._market()
+        _, forward, basket_sigma = geometric_basket_moments(
+            spots[:1], rates[:1], maturities[:1],
+            config.volatilities, config.correlation, config.dividends,
+        )
+        rng = np.random.default_rng(4242)
+        chol = np.linalg.cholesky(config.correlation)
+        z = rng.standard_normal((400_000, config.n_assets)) @ chol.T
+        drift = (rates[0] - 0.5 * config.volatilities**2) * maturities[0]
+        terminal = spots[0] * np.exp(
+            drift + config.volatilities * np.sqrt(maturities[0]) * z
+        )
+        basket = np.exp(np.log(terminal).mean(axis=1))
+        standard_error = basket.std(ddof=1) / np.sqrt(basket.size)
+        self.assertLess(abs(basket.mean() - forward[0]), 4.0 * standard_error)
+        # sigma_B is the lognormal volatility of that same basket.
+        realized = np.std(np.log(basket / spots[0].prod() ** 0.2), ddof=1)
+        self.assertAlmostEqual(
+            realized / np.sqrt(maturities[0]), basket_sigma[0], places=2
+        )
+
+    def test_call_pricer_class_agrees_with_function(self):
+        config, spots, strikes, rates, maturities = self._market()
+        parameters = np.column_stack((spots, strikes, rates, maturities))
+        np.testing.assert_allclose(
+            EuropeanGeometricBasketCallPricer(config)(parameters),
+            geometric_basket_call(
+                spots, strikes, rates, maturities,
+                config.volatilities, config.correlation, config.dividends,
+            ),
+            rtol=0.0,
+            atol=1e-13,
+        )
+
+    def test_monte_carlo_call_matches_closed_form(self):
+        config, spots, strikes, rates, maturities = self._market()
+        rng = np.random.default_rng(20260921)
+        chol = np.linalg.cholesky(config.correlation)
+        z = rng.standard_normal((200_000, config.n_assets)) @ chol.T
+        drift = (rates[0] - 0.5 * config.volatilities**2) * maturities[0]
+        terminal = spots[0] * np.exp(
+            drift + config.volatilities * np.sqrt(maturities[0]) * z
+        )
+        basket = np.exp(np.log(terminal).mean(axis=1))
+        payoff = np.maximum(basket - strikes[0], 0.0) * np.exp(
+            -rates[0] * maturities[0]
+        )
+        standard_error = payoff.std(ddof=1) / np.sqrt(payoff.size)
+        exact = geometric_basket_call(
+            spots[:1], strikes[:1], rates[:1], maturities[:1],
+            config.volatilities, config.correlation, config.dividends,
+        )[0]
+        self.assertLess(abs(payoff.mean() - exact), 4.0 * standard_error)
 
 
 class PricingTests(unittest.TestCase):

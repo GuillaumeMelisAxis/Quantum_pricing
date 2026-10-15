@@ -19,6 +19,7 @@ sits in the cell's own range rather than asserting it is unexceptional.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -237,9 +238,38 @@ def main() -> int:
     parser.add_argument("--budgets", type=int, nargs="+", default=list(TT_BUDGETS))
     parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
     parser.add_argument("--skip-cell-sweep", action="store_true")
+    parser.add_argument(
+        "--floors-from",
+        type=Path,
+        default=None,
+        help=(
+            "reuse the interpolation floors recorded in a previous run's JSON "
+            "instead of recomputing them. The floor depends only on the grid and "
+            "the test set, both of which are frozen, so recomputation is "
+            "deterministic; reusing guarantees the two runs are compared against "
+            "the exact same floor rather than merely the same recipe."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--tag", type=str, default="phase4")
     args = parser.parse_args()
+
+    reused_floors = None
+    if args.floors_from:
+        source_payload = json.loads(
+            Path(args.floors_from).read_text(encoding="utf-8")
+        )
+        reused_floors = source_payload["floors_by_d_sigma"]
+        if int(source_payload["n_sigma"]) != int(args.n_sigma):
+            parser.error(
+                f"--floors-from was produced at n_sigma="
+                f"{source_payload['n_sigma']}, not {args.n_sigma}"
+            )
+        if int(source_payload["n_test_points"]) != int(args.points):
+            parser.error(
+                f"--floors-from was produced on "
+                f"{source_payload['n_test_points']} test points, not {args.points}"
+            )
 
     n_sigma = int(args.n_sigma)
     reference_config = build_config(0, n_sigma)
@@ -268,14 +298,19 @@ def main() -> int:
 
         floor_model = SigmaAugmentedSurrogate(config, RISK_GRID["mode"])
         start = perf_counter()
-        floors = interpolation_floors(floor_model, test_sets)
+        if reused_floors is not None:
+            floors = reused_floors[str(d_sigma)]
+            origin = f"reused from {args.floors_from.name}"
+        else:
+            floors = interpolation_floors(floor_model, test_sets)
+            origin = f"{perf_counter() - start:.1f}s"
         print(
             f"  d_sigma={d_sigma} floors "
             + " ".join(
                 f"{name}={value['normalized_mae']:.4e}"
                 for name, value in floors.items()
             )
-            + f"  [{perf_counter() - start:.1f}s]",
+            + f"  [{origin}]",
             flush=True,
         )
         floor_payload[str(d_sigma)] = floors

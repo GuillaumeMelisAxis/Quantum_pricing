@@ -50,6 +50,119 @@ def geometric_basket_put(
     return discounted_k * ndtr(-d2) - discounted_forward_component * ndtr(-d1)
 
 
+def geometric_basket_moments(
+    spots: np.ndarray,
+    rates: np.ndarray,
+    maturities: np.ndarray,
+    volatilities: np.ndarray,
+    correlation: np.ndarray,
+    dividends: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Spot, forward and lognormal volatility of an equally weighted geometric basket.
+
+    The geometric basket of correlated GBMs is itself a GBM, so three numbers
+    describe it completely: ``G_0``, the forward ``F = E^Q[G_T]`` and the
+    basket volatility ``sigma_B``. Every closed-form quantity below is a
+    Black-Scholes expression in those three, which is why they are returned as
+    a unit instead of being recomputed per payoff.
+    """
+    spots = np.atleast_2d(np.asarray(spots, dtype=float))
+    m, n_assets = spots.shape
+    rates = np.broadcast_to(np.asarray(rates, dtype=float), (m,))
+    maturities = np.broadcast_to(np.asarray(maturities, dtype=float), (m,))
+    sigma = np.atleast_2d(np.asarray(volatilities, dtype=float))
+    if sigma.shape[1] != n_assets or sigma.shape[0] not in (1, m):
+        raise ValueError("volatilities must be one vector or one vector per row")
+    q = np.zeros(n_assets) if dividends is None else np.asarray(dividends, dtype=float)
+    weights = np.full(n_assets, 1.0 / n_assets)
+
+    scaled = sigma * weights
+    basket_variance = np.sum(
+        (scaled @ np.asarray(correlation, dtype=float)) * scaled, axis=1
+    )
+    g0 = np.exp(np.log(spots) @ weights)
+    carry = rates - weights @ q - 0.5 * (sigma**2 @ weights) + 0.5 * basket_variance
+    forward = g0 * np.exp(carry * maturities)
+    return (
+        np.broadcast_to(g0, (m,)).astype(float, copy=False),
+        np.broadcast_to(forward, (m,)).astype(float, copy=False),
+        np.broadcast_to(np.sqrt(basket_variance), (m,)).astype(float, copy=False),
+    )
+
+
+def geometric_basket_parity_offset(
+    spots: np.ndarray,
+    strikes: np.ndarray,
+    rates: np.ndarray,
+    maturities: np.ndarray,
+    volatilities: np.ndarray,
+    correlation: np.ndarray,
+    dividends: np.ndarray | None = None,
+) -> np.ndarray:
+    """``C - P`` for a European geometric-basket option: ``e^{-rT} (F - K)``.
+
+    The offset is model-exact and costs no option-pricing work, so a surrogate
+    that was only ever calibrated on puts prices the matching calls at machine
+    precision relative to its own put. The call error is therefore exactly the
+    put error, not the put error plus a second approximation.
+    """
+    strikes = np.asarray(strikes, dtype=float)
+    _, forward, _ = geometric_basket_moments(
+        spots, rates, maturities, volatilities, correlation, dividends
+    )
+    m = forward.size
+    strikes = np.broadcast_to(strikes, (m,))
+    rates = np.broadcast_to(np.asarray(rates, dtype=float), (m,))
+    maturities = np.broadcast_to(np.asarray(maturities, dtype=float), (m,))
+    return np.exp(-rates * maturities) * (forward - strikes)
+
+
+def geometric_basket_call(
+    spots: np.ndarray,
+    strikes: np.ndarray,
+    rates: np.ndarray,
+    maturities: np.ndarray,
+    volatilities: np.ndarray,
+    correlation: np.ndarray,
+    dividends: np.ndarray | None = None,
+) -> np.ndarray:
+    """Closed-form call on an equally weighted geometric basket under GBM.
+
+    Written from its own ``d_1``/``d_2`` expression rather than by adding the
+    parity offset to :func:`geometric_basket_put`, so that the parity identity
+    stays a testable property of the module instead of a definition.
+    """
+    strikes = np.asarray(strikes, dtype=float)
+    _, forward, basket_sigma = geometric_basket_moments(
+        spots, rates, maturities, volatilities, correlation, dividends
+    )
+    m = forward.size
+    strikes = np.broadcast_to(strikes, (m,))
+    rates = np.broadcast_to(np.asarray(rates, dtype=float), (m,))
+    maturities = np.broadcast_to(np.asarray(maturities, dtype=float), (m,))
+
+    std = basket_sigma * np.sqrt(np.maximum(maturities, 1e-16))
+    d1 = (np.log(forward / strikes) + 0.5 * std**2) / std
+    d2 = d1 - std
+    discount = np.exp(-rates * maturities)
+    return discount * (forward * ndtr(d1) - strikes * ndtr(d2))
+
+
+class EuropeanGeometricBasketCallPricer:
+    """Closed-form geometric-basket call over ``(S_1, ..., S_d, K, r, T)`` rows."""
+
+    def __init__(self, config):
+        self.config = config
+
+    def __call__(self, parameters: np.ndarray) -> np.ndarray:
+        x = np.atleast_2d(np.asarray(parameters, dtype=float))
+        n = self.config.n_assets
+        return geometric_basket_call(
+            x[:, :n], x[:, n], x[:, n + 1], x[:, n + 2],
+            self.config.volatilities, self.config.correlation, self.config.dividends,
+        )
+
+
 class EuropeanGeometricBasketPricer:
     def __init__(self, config):
         self.config = config

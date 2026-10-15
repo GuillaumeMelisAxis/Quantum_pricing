@@ -214,3 +214,10 @@ def write_json(path: Path, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return path
+
+# TT-cross imposes no absolute rank cap. What does bind is the increment
+# schedule: `teneva.maxvol_rect` adds at most `dr_max` rows per call, each bond
+# is visited twice per sweep, and `teneva.anova(r=2, ...)` starts the chain at
+# rank 2, so `r_k <= 2 + 2 * dr_max * nswp`. With no tolerance passed to
+# `teneva.cross`, `nswp` is whatever the oracle budget affords.
+ANOVA_RANK_NOTE = "teneva.anova(r=2, order=2) starts every chain at rank 2"

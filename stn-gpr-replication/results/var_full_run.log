@@ -1,0 +1,31 @@
+profil full
+1. generation de l'historique de chocs
+   phi                              0.9881658194110152
+   eta                              0.05368629606426778
+   rho_v_prime                      0.6125
+   vol_days_outside_reporting_band  23
+   realized_annualized_vol          0.217020786273476
+   daily_return_sd                  0.013671024519317081
+   daily_return_kurtosis            11.571875034981687
+   daily_log_vol_change_sd          0.05435498912501677
+   empirical_return_correlation     0.28912088248140255
+   empirical_vol_correlation        0.5093528080594926
+   empirical_leverage               -0.5754080326931624
+   vol_min                          0.043948816957575965
+   vol_max                          0.639454769052257
+   worst_1d_return                  -0.16336213975558955
+   best_1d_return                   0.1334864999379155
+2. scenarios
+   historique : 2000 scenarios, 0 spots et 0 vols ecretes
+   monte carlo: 5000 scenarios, 0 spots et 0 vols ecretes
+3. apprentissage des grilles hybrides (cout d'initialisation)
+   budget  20,000:   89.8 s, rang 10.55, 12,742 parametres
+   budget  60,000:  106.5 s, rang 16.30, 30,344 parametres
+   budget 150,000:  189.6 s, rang 22.51, 57,876 parametres
+4. VaR historique (full valuation)
+  [HS] forme fermee: 0.008 s
+  [HS] grille  20,000: 1.786 s
+  [HS] grille  60,000: 3.508 s
+  [HS] grille 150,000: 5.683 s
+  [HS] MC   4,096 (independant): 16.5 s
+  [HS] MC  16,384 (independant): 101.3 s

@@ -288,10 +288,11 @@ def section_phase3(payload) -> str:
     )
 
 
-def section_phase4(rows, aggregate_rows, payload) -> str:
-    if not rows or not aggregate_rows:
-        return f"### Phase 4 — balayage en `d_sigma`\n\n{NOT_RUN}\n"
-    main = table(
+PRE_REGISTERED = "pre-registered"
+
+
+def _phase4_table(aggregate_rows) -> str:
+    return table(
         ["d_sigma", "budget", "appels realises", "coeurs", "log2 entrees",
          "rang effectif", "rang max", "max r bloc sigma", "r frontiere",
          "parametres TT", "NMAE tranche", "plancher", "x plancher",
@@ -324,6 +325,40 @@ def section_phase4(rows, aggregate_rows, payload) -> str:
             )
         ],
     )
+
+
+def section_phase4(rows, aggregate_rows, payload) -> str:
+    if not rows or not aggregate_rows:
+        return f"### Phase 4 — balayage en `d_sigma`\n\n{NOT_RUN}\n"
+
+    # A budget added after the ladder had been inspected is not the same kind of
+    # number as one fixed before the first fit. Both are reported; they are not
+    # merged into one table, and the post-hoc one is named as such.
+    tiers = {row.get("budget_tier", PRE_REGISTERED) for row in aggregate_rows}
+    pre = [
+        row for row in aggregate_rows
+        if row.get("budget_tier", PRE_REGISTERED) == PRE_REGISTERED
+    ]
+    post = [
+        row for row in aggregate_rows
+        if row.get("budget_tier", PRE_REGISTERED) != PRE_REGISTERED
+    ]
+    main = _phase4_table(pre)
+    extension = ""
+    if post and len(tiers) > 1:
+        post_budgets = sorted({int(row["budget_nominal"]) for row in post})
+        extension = (
+            "\n\n#### Palier post-hoc (hors pre-enregistrement)\n\n"
+            f"Budget(s) `{post_budgets}`, ajoute(s) **apres** que l'echelle "
+            "pre-enregistree ait ete executee et examinee, et applique(s) "
+            "uniformement a tous les `d_sigma` — pas a une configuration "
+            "isolee. Les planchers d'interpolation sont ceux de la phase 4, "
+            "reutilises et non recalcules, donc les deux paliers se comparent "
+            "au meme plancher exact. Ces lignes ne doivent pas etre presentees "
+            "comme pre-enregistrees.\n\n"
+            + _phase4_table(post)
+        )
+
     checks = {
         "shared_core_order_preserved": all(
             row["shared_core_order_preserved"] == "True" for row in rows
@@ -342,11 +377,11 @@ def section_phase4(rows, aggregate_rows, payload) -> str:
     total = payload.get("total_wall_seconds") if payload else None
     return (
         "### Phase 4 — balayage en `d_sigma`\n\n"
-        f"{len(rows)} fits. Moyennes ± ecarts-types sur les "
+        f"{len(rows)} fits au total. Moyennes ± ecarts-types sur les "
         f"{len({row['seed'] for row in rows})} seeds. Rang et NMAE sur la meme "
         "ligne ; un fit `UNRESOLVED` reste dans le tableau et est exclu de toute "
         "conclusion sur la compressibilite.\n\n"
-        f"{main}\n\n"
+        f"{main}{extension}\n\n"
         "**Verification de l'ordre des modes** (chaine `d_sigma=0` = chaine "
         "`d_sigma=k` privee des coeurs sigma) :\n\n"
         f"{verification}\n"
@@ -354,15 +389,17 @@ def section_phase4(rows, aggregate_rows, payload) -> str:
     )
 
 
-def section_phase5(figure_dir: Path) -> str:
-    names = [
-        ("figure1_statistical_cost", "Figure 1 — cout statistique"),
-        ("figure2_rank_profile", "Figure 2 — profil de rang"),
-        ("figure3_dimensional_slope", "Figure 3 — pente dimensionnelle"),
-        ("figureS1_sigma_cell", "Figure S1 — NMAE sur une maille sigma"),
-    ]
+FIGURE_NAMES = (
+    ("figure1_statistical_cost", "Figure 1 — cout statistique"),
+    ("figure2_rank_profile", "Figure 2 — profil de rang"),
+    ("figure3_dimensional_slope", "Figure 3 — pente dimensionnelle"),
+    ("figureS1_sigma_cell", "Figure S1 — NMAE sur une maille sigma"),
+)
+
+
+def _figure_table(figure_dir: Path) -> str:
     rows = []
-    for stem, label in names:
+    for stem, label in FIGURE_NAMES:
         pdf = figure_dir / f"{stem}.pdf"
         svg = figure_dir / f"{stem}.svg"
         rows.append([
@@ -370,11 +407,56 @@ def section_phase5(figure_dir: Path) -> str:
             f"`{pdf.relative_to(pdf.parents[2])}`" if pdf.exists() else NOT_RUN,
             f"`{svg.relative_to(svg.parents[2])}`" if svg.exists() else NOT_RUN,
         ])
-    return (
-        "## 3. Figures\n\nFormat vectoriel, sans titre integre.\n\n"
-        + table(["figure", "PDF", "SVG"], rows)
-        + "\n"
-    )
+    return table(["figure", "PDF", "SVG"], rows)
+
+
+def section_phase5(figure_sets) -> str:
+    """One figure table per set, so a post-hoc set is never mistaken for the other.
+
+    ``figure_sets`` is a sequence of ``(directory, caption)``. Sets whose
+    directory does not exist are dropped rather than listed as missing, since a
+    run without a post-hoc tier legitimately has only one set.
+    """
+    parts = ["## 3. Figures", "", "Format vectoriel, sans titre integre.", ""]
+    present = [(path, caption) for path, caption in figure_sets if path.exists()]
+    if not present:
+        return "\n".join(parts + [NOT_RUN, ""])
+    for path, caption in present:
+        if len(present) > 1:
+            parts += [f"**{caption}**", ""]
+        parts += [_figure_table(path), ""]
+    return "\n".join(parts)
+
+
+def section_diagnostics(source: Path, specifications) -> str:
+    """Runs that vary a frozen parameter, kept out of the main tables.
+
+    Changing ``n_sigma`` changes the grid, so such a run is not another row of
+    the ``d_sigma`` sweep - its interpolation floor and its core count are
+    different. It answers a question about the sweep without being part of it,
+    and is reported that way.
+    """
+    if not specifications:
+        return ""
+    parts = ["### Runs diagnostiques (parametre gele modifie)", ""]
+    for specification in specifications:
+        tag, _, label = specification.partition(":")
+        rows = load_csv(source / f"{tag}_agrege.csv")
+        payload = load_json(source / f"{tag}_run.json")
+        parts += [f"**{label or tag}** (`{tag}_*`)", ""]
+        if not rows:
+            parts += [NOT_RUN, ""]
+            continue
+        if payload:
+            parts += [
+                (f"n_sigma = {payload['n_sigma']}, "
+                 f"{payload['n_test_points']} points de test "
+                 "(axes partages strictement identiques a ceux du balayage "
+                 "principal)."),
+                "",
+            ]
+        parts += [_phase4_table(rows), ""]
+    return "\n".join(parts)
 
 
 def section_phase6(rows_6a, rows_6b) -> str:
@@ -434,7 +516,7 @@ def section_phase6(rows_6a, rows_6b) -> str:
     return "\n".join(out)
 
 
-def section_observations(aggregate_rows, cell_rows, cell_floor_rows) -> str:
+def section_observations(aggregate_rows, cell_sweeps, cell_floor_rows) -> str:
     """Strictly descriptive: what the numbers are, not what they mean."""
     if not aggregate_rows:
         return f"## 4. Observations\n\n{NOT_RUN}\n"
@@ -507,7 +589,9 @@ def section_observations(aggregate_rows, cell_rows, cell_floor_rows) -> str:
     else:
         lines.append("- Aucun fit n'a ete marque `UNRESOLVED`.")
 
-    if cell_rows:
+    for cell_rows, cell_label in cell_sweeps:
+        if not cell_rows:
+            continue
         values = {}
         for row in cell_rows:
             values.setdefault(float(row["sigma"]), []).append(float(row["nmae"]))
@@ -515,6 +599,7 @@ def section_observations(aggregate_rows, cell_rows, cell_floor_rows) -> str:
         means = np.array([np.mean(values[s]) for s in sigmas])
         at_ref = int(np.argmin(np.abs(np.array(sigmas) - SIGMA_REF)))
         rank_of_ref = int(np.sum(means < means[at_ref])) + 1
+        lines.append(f"- **{cell_label}**")
         lines.append(
             f"- Balayage de la maille sigma ({len(sigmas)} valeurs de "
             f"{sigmas[0]:.6f} a {sigmas[-1]:.6f}, bornes = noeuds de grille) : "
@@ -523,7 +608,8 @@ def section_observations(aggregate_rows, cell_rows, cell_floor_rows) -> str:
             f"l'intervalle sur la maille est [{means.min():.4e}, {means.max():.4e}], "
             f"mediane {np.median(means):.4e}. "
             f"Le minimum de la maille est atteint a sigma = "
-            f"{sigmas[int(np.argmin(means))]:.6f}."
+            f"{sigmas[int(np.argmin(means))]:.6f}. Amplitude relative sur la "
+            f"maille : {means.max() / means.min():.3f}x."
         )
     if cell_floor_rows:
         fs = sorted((float(r["sigma"]), float(r["floor_nmae"])) for r in cell_floor_rows)
@@ -613,6 +699,26 @@ def main() -> int:
         default=Path(__file__).resolve().parents[2] / "rapport_experiences.md",
     )
     parser.add_argument("--note", action="append", default=[])
+    parser.add_argument(
+        "--cell-sweep",
+        action="append",
+        default=[],
+        metavar="TAG:LABEL",
+        help=(
+            "an additional sigma-cell sweep to report alongside the "
+            "pre-registered one. Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--diagnostic",
+        action="append",
+        default=[],
+        metavar="TAG:LABEL",
+        help=(
+            "a run that varies a parameter the protocol froze, reported in its "
+            "own section rather than alongside the main sweep. Repeatable."
+        ),
+    )
     args = parser.parse_args()
 
     source = Path(args.input_dir)
@@ -624,7 +730,22 @@ def main() -> int:
     phase4 = load_json(source / f"{args.tag}_run.json")
     phase4_rows = load_csv(source / f"{args.tag}_resultats.csv")
     phase4_agg = load_csv(source / f"{args.tag}_agrege.csv")
-    cell = load_csv(source / f"{args.tag}_sigma_cell_nmae.csv")
+    # The cell sweep can exist at more than one budget: the pre-registered one
+    # and any later re-run. All of them are reported, each labelled with the
+    # budget it was measured at, because a sweep taken on unresolved fits and one
+    # taken on resolved fits are not the same measurement.
+    cell_sweeps = []
+    for tag, label in [
+        (args.tag, f"balayage pre-enregistre ({args.tag})"),
+        *[
+            (spec.split(":", 1)[0], spec.split(":", 1)[1] if ":" in spec else spec)
+            for spec in args.cell_sweep
+        ],
+    ]:
+        rows = load_csv(source / f"{tag}_sigma_cell_nmae.csv")
+        if rows:
+            budgets = sorted({int(row["budget_nominal"]) for row in rows})
+            cell_sweeps.append((rows, f"{label}, budget {budgets}"))
     cell_floor = load_csv(source / f"{args.tag}_sigma_cell_floor.csv")
     control_6a = load_csv(source / "phase6a_ordre_modes.csv")
     control_6b = load_csv(source / "phase6b_grille_pricing.csv")
@@ -650,9 +771,22 @@ def main() -> int:
         section_phase2(phase2_rows, phase2),
         section_phase3(phase3),
         section_phase4(phase4_rows, phase4_agg, phase4),
+        section_diagnostics(source, args.diagnostic),
         section_phase6(control_6a, control_6b),
-        section_phase5(source / "figures"),
-        section_observations(phase4_agg, cell, cell_floor),
+        section_phase5(
+            (
+                (
+                    source / "figures",
+                    ("Echelle de budgets pre-enregistree, telle que produite "
+                     "par la phase 4"),
+                ),
+                (
+                    source / "figures_extended",
+                    "Memes figures, palier post-hoc inclus",
+                ),
+            )
+        ),
+        section_observations(phase4_agg, cell_sweeps, cell_floor),
         section_anomalies(phase4_rows, phase1, phase2, phase3, args.note),
     ]
     Path(args.output).write_text("\n".join(parts), encoding="utf-8")

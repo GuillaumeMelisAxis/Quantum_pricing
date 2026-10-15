@@ -8,9 +8,9 @@ Genere par `scripts/experiments/build_report.py` a partir des seuls artefacts de
 
 | item | value |
 |---|---|
-| commit | `9c9f1fded4d284d8a981f56209646c8e3e5bd2f5` |
+| commit | `f39cfe54238ddb4833a91a875ef4ee1db14e2c46` |
 | branch | `dimensionality_experiments` |
-| working tree | dirty (8 files) |
+| working tree | dirty (6 files) |
 | python | 3.12.9 |
 | numpy | 2.5.2 |
 | scipy | 1.18.0 |
@@ -98,7 +98,7 @@ Tous les compteurs requis collectes : **oui**.
 
 ### Phase 4 — balayage en `d_sigma`
 
-100 fits. Moyennes ± ecarts-types sur les 5 seeds. Rang et NMAE sur la meme ligne ; un fit `UNRESOLVED` reste dans le tableau et est exclu de toute conclusion sur la compressibilite.
+125 fits au total. Moyennes ± ecarts-types sur les 5 seeds. Rang et NMAE sur la meme ligne ; un fit `UNRESOLVED` reste dans le tableau et est exclu de toute conclusion sur la compressibilite.
 
 | d_sigma | budget | appels realises | coeurs | log2 entrees | rang effectif | rang max | max r bloc sigma | r frontiere | parametres TT | NMAE tranche | plancher | x plancher | NMAE pave sigma | NMAE hors noeud | statut | fit (s) | s/requete |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -123,21 +123,58 @@ Tous les compteurs requis collectes : **oui**.
 | 5 | 150000 | 151664 | 68 | 68 | 24.29 ± 0.19 | 29.2 | 26.2 | 23.4 | 78006 | 1.078e-04 ± 4.5e-05 | 2.640e-06 | 40.83 | 1.192e-04 | 1.088e-04 | 5/5 UNRESOLVED | 56 | 3.65e-04 |
 | 5 | 300000 | 301393 | 68 | 68 | 30.91 ± 0.18 | 36.4 | 34.2 | 31.4 | 126230 | 1.096e-05 ± 3.3e-06 | 2.640e-06 | 4.15 | 1.117e-05 | 1.211e-05 | 4/5 UNRESOLVED | 100 | 1.11e-03 |
 
+#### Palier post-hoc (hors pre-enregistrement)
+
+Budget(s) `[600000]`, ajoute(s) **apres** que l'echelle pre-enregistree ait ete executee et examinee, et applique(s) uniformement a tous les `d_sigma` — pas a une configuration isolee. Les planchers d'interpolation sont ceux de la phase 4, reutilises et non recalcules, donc les deux paliers se comparent au meme plancher exact. Ces lignes ne doivent pas etre presentees comme pre-enregistrees.
+
+| d_sigma | budget | appels realises | coeurs | log2 entrees | rang effectif | rang max | max r bloc sigma | r frontiere | parametres TT | NMAE tranche | plancher | x plancher | NMAE pave sigma | NMAE hors noeud | statut | fit (s) | s/requete |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | 600000 | 601175 | 48 | 48 | 43.31 ± 0.09 | 51.0 | NOT APPLICABLE | NOT APPLICABLE | 172744 | 2.348e-06 ± 6.1e-13 | 2.348e-06 | 1.00 | NOT APPLICABLE | NOT APPLICABLE | resolved | 80 | 8.37e-04 |
+| 1 | 600000 | 601225 | 52 | 52 | 42.02 ± 0.13 | 49.8 | 8.0 | 16.0 | 176748 | 2.358e-06 ± 5.4e-10 | 2.358e-06 | 1.00 | 2.420e-06 | 2.346e-06 | resolved | 95 | 8.71e-04 |
+| 2 | 600000 | 600919 | 56 | 56 | 41.19 ± 0.13 | 49.0 | 45.2 | 41.4 | 183420 | 2.433e-06 ± 5.9e-09 | 2.413e-06 | 1.01 | 2.460e-06 | 2.379e-06 | resolved | 87 | 8.56e-04 |
+| 3 | 600000 | 601196 | 60 | 60 | 40.54 ± 0.05 | 47.0 | 46.0 | 40.6 | 190837 | 2.535e-06 ± 2.1e-08 | 2.481e-06 | 1.02 | 2.552e-06 | 2.464e-06 | resolved | 76 | 9.01e-04 |
+| 5 | 600000 | 601159 | 68 | 68 | 38.80 ± 0.22 | 45.2 | 42.2 | 39.4 | 198848 | 4.361e-06 ± 5.2e-07 | 2.640e-06 | 1.65 | 4.638e-06 | 4.630e-06 | resolved | 172 | 1.44e-03 |
+
 **Verification de l'ordre des modes** (chaine `d_sigma=0` = chaine `d_sigma=k` privee des coeurs sigma) :
 
-- `shared_core_order_preserved` : **verifie sur les 100 fits**
-- `sigma_cores_contiguous` : **verifie sur les 100 fits**
-- `sigma_block_at_chain_tail` : **verifie sur les 100 fits**
+- `shared_core_order_preserved` : **verifie sur les 125 fits**
+- `sigma_cores_contiguous` : **verifie sur les 125 fits**
+- `sigma_block_at_chain_tail` : **verifie sur les 125 fits**
 
-Temps total : 1.83 h.
+Temps total : 2.60 h.
+
+### Runs diagnostiques (parametre gele modifie)
+
+**d_sigma=5 a n_sigma=32 (n_sigma etait gele a 16)** (`phase4c_nsigma32_*`)
+
+n_sigma = 32, 2000 points de test (axes partages strictement identiques a ceux du balayage principal).
+
+| d_sigma | budget | appels realises | coeurs | log2 entrees | rang effectif | rang max | max r bloc sigma | r frontiere | parametres TT | NMAE tranche | plancher | x plancher | NMAE pave sigma | NMAE hors noeud | statut | fit (s) | s/requete |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 5 | 600000 | 601462 | 73 | 73 | 37.91 ± 0.11 | 43.6 | 42.4 | 39.0 | 204200 | 4.311e-06 ± 4.7e-07 | 2.354e-06 | 1.83 | 4.885e-06 | 4.635e-06 | resolved | 207 | 2.21e-03 |
 
 ### Phase 6 — controles
 
-`NOT RUN`
+**6a — sensibilite a l'ordre des modes.**
+
+| ordre | rang effectif | parametres TT | max r bloc sigma | NMAE tranche | seeds | UNRESOLVED |
+|---|---|---|---|---|---|---|
+| head | 24.31 ± 0.12 | 78131 | 27.3 | 2.287e-04 ± 1.7e-04 | 3 | 3 |
+| interleaved | 23.79 ± 0.04 | 74803 | 28.7 | 6.140e-05 ± 1.0e-05 | 3 | 3 |
+| tail | 24.40 ± 0.15 | 78717 | 26.3 | 1.309e-04 ± 4.3e-05 | 3 | 3 |
+
+**6b — controle sur la grille de pricing.**
+
+| d_sigma | rang effectif | parametres TT | max r bloc sigma | NMAE tranche | seeds | UNRESOLVED |
+|---|---|---|---|---|---|---|
+| 0 | 30.51 ± 0.23 | 65290 | NOT APPLICABLE | 1.685e-05 ± 6.8e-11 | 5 | 0 |
+| 5 | 26.17 ± 0.17 | 75420 | 29.8 | 1.988e-04 ± 8.2e-05 | 5 | 5 |
 
 ## 3. Figures
 
 Format vectoriel, sans titre integre.
+
+**Echelle de budgets pre-enregistree, telle que produite par la phase 4**
 
 | figure | PDF | SVG |
 |---|---|---|
@@ -146,26 +183,46 @@ Format vectoriel, sans titre integre.
 | Figure 3 — pente dimensionnelle | `experiments\figures\figure3_dimensional_slope.pdf` | `experiments\figures\figure3_dimensional_slope.svg` |
 | Figure S1 — NMAE sur une maille sigma | `experiments\figures\figureS1_sigma_cell.pdf` | `experiments\figures\figureS1_sigma_cell.svg` |
 
+**Memes figures, palier post-hoc inclus**
+
+| figure | PDF | SVG |
+|---|---|---|
+| Figure 1 — cout statistique | `experiments\figures_extended\figure1_statistical_cost.pdf` | `experiments\figures_extended\figure1_statistical_cost.svg` |
+| Figure 2 — profil de rang | `experiments\figures_extended\figure2_rank_profile.pdf` | `experiments\figures_extended\figure2_rank_profile.svg` |
+| Figure 3 — pente dimensionnelle | `experiments\figures_extended\figure3_dimensional_slope.pdf` | `experiments\figures_extended\figure3_dimensional_slope.svg` |
+| Figure S1 — NMAE sur une maille sigma | `experiments\figures_extended\figureS1_sigma_cell.pdf` | `experiments\figures_extended\figureS1_sigma_cell.svg` |
+
 ## 4. Observations
 
 Section descriptive. Aucune interpretation, aucune redaction destinee au manuscrit.
 
-- Au plus grand budget (300000), le rang de lien maximal interne au bloc sigma vaut 8.0 a d_sigma=1, 37.2 a d_sigma=2, 35.6 a d_sigma=3, 34.2 a d_sigma=5.
-- Le rang effectif global vaut 34.24 a d_sigma=0, 33.50 a d_sigma=1, 32.75 a d_sigma=2, 32.14 a d_sigma=3, 30.91 a d_sigma=5.
-- Le nombre de parametres TT passe de 108023 (d_sigma=0) a 126230 (d_sigma=5), facteur 1.17, tandis que le nombre d'entrees logiques passe de 2^48 a 2^68.
-- La NMAE sur la tranche commune au plus grand budget vaut 2.349e-06 a d_sigma=0, 2.368e-06 a d_sigma=1, 2.589e-06 a d_sigma=2, 3.374e-06 a d_sigma=3, 1.096e-05 a d_sigma=5.
+- Au plus grand budget (600000), le rang de lien maximal interne au bloc sigma vaut 8.0 a d_sigma=1, 45.2 a d_sigma=2, 46.0 a d_sigma=3, 42.2 a d_sigma=5.
+- Le rang effectif global vaut 43.31 a d_sigma=0, 42.02 a d_sigma=1, 41.19 a d_sigma=2, 40.54 a d_sigma=3, 38.80 a d_sigma=5.
+- Le nombre de parametres TT passe de 172744 (d_sigma=0) a 198848 (d_sigma=5), facteur 1.15, tandis que le nombre d'entrees logiques passe de 2^48 a 2^68.
+- La NMAE sur la tranche commune au plus grand budget vaut 2.348e-06 a d_sigma=0, 2.358e-06 a d_sigma=1, 2.433e-06 a d_sigma=2, 2.535e-06 a d_sigma=3, 4.361e-06 a d_sigma=5.
 - Configurations comportant au moins un fit `UNRESOLVED` : d_sigma=0 budget=20000 (5/5); d_sigma=1 budget=20000 (5/5); d_sigma=1 budget=60000 (5/5); d_sigma=2 budget=20000 (5/5); d_sigma=2 budget=60000 (5/5); d_sigma=3 budget=20000 (5/5); d_sigma=3 budget=60000 (5/5); d_sigma=3 budget=150000 (5/5); d_sigma=5 budget=20000 (5/5); d_sigma=5 budget=60000 (5/5); d_sigma=5 budget=150000 (5/5); d_sigma=5 budget=300000 (4/5).
-- Balayage de la maille sigma (20 valeurs de 0.196667 a 0.233333, bornes = noeuds de grille) : la NMAE a sigma = 0.200526 vaut 1.0992e-05, soit le rang 3 sur 20 par valeur croissante ; l'intervalle sur la maille est [1.0764e-05, 1.2096e-05], mediane 1.1746e-05. Le minimum de la maille est atteint a sigma = 0.196667.
+- **balayage pre-enregistre (phase4_extended), budget [300000]**
+- Balayage de la maille sigma (20 valeurs de 0.196667 a 0.233333, bornes = noeuds de grille) : la NMAE a sigma = 0.200526 vaut 1.0992e-05, soit le rang 3 sur 20 par valeur croissante ; l'intervalle sur la maille est [1.0764e-05, 1.2096e-05], mediane 1.1746e-05. Le minimum de la maille est atteint a sigma = 0.196667. Amplitude relative sur la maille : 1.124x.
+- **balayage rejoue sur fits resolus, budget [600000]**
+- Balayage de la maille sigma (20 valeurs de 0.196667 a 0.233333, bornes = noeuds de grille) : la NMAE a sigma = 0.200526 vaut 4.3765e-06, soit le rang 3 sur 20 par valeur croissante ; l'intervalle sur la maille est [4.3359e-06, 4.7786e-06], mediane 4.6476e-06. Le minimum de la maille est atteint a sigma = 0.198596. Amplitude relative sur la maille : 1.102x.
 - Plancher d'interpolation sur la meme maille : 2.4969e-06 a sigma_ref, intervalle [2.1558e-06, 3.1229e-06], minimum a sigma = 0.196667.
 
 ## 5. Anomalies et echecs
 
-- 59 fits sur 100 depassent le plancher d'interpolation de leur grille d'un facteur superieur a 3 et sont marques `UNRESOLVED`. Ils restent dans les tableaux et sont exclus de toute conclusion sur la compressibilite.
+- 59 fits sur 125 depassent le plancher d'interpolation de leur grille d'un facteur superieur a 3 et sont marques `UNRESOLVED`. Ils restent dans les tableaux et sont exclus de toute conclusion sur la compressibilite.
 - d_sigma=2, budget=60000 : la seed 20260403 s'ecarte de la mediane des seeds de 348 % en NMAE (1.398e-04 contre 3.122e-05). Rapportee, non exclue.
 - d_sigma=3, budget=60000 : la seed 20260403 s'ecarte de la mediane des seeds de 125 % en NMAE (1.630e-04 contre 7.260e-05). Rapportee, non exclue.
-- Le balayage de maille sigma echantillonne 20 valeurs uniformes de noeud a noeud ; sigma_ref = 0.20 ne fait pas partie des 20 echantillons (les plus proches sont 0.198596 et 0.200526). ECART AU PROTOCOLE, non corrige a posteriori : la mesure a exactement sigma_ref existe par ailleurs (colonne 'NMAE tranche' de la phase 4) et se compare directement a l'intervalle de la maille.
-- La colonne 'max r bloc sigma' ne mesure pas la meme chose a d_sigma=1 qu'au-dela. A d_sigma=1 le bloc sigma ne contient qu'un seul axe physique, donc ses liens internes sont les liens de la decomposition QTT binaire de cet axe ; a partir de d_sigma=2 ils incluent les liens entre axes sigma, qui portent le couplage inter-actifs. La discontinuite visible sur le panneau gauche de la figure 3 entre d_sigma=1 et d_sigma=2 est de nature definitionnelle, pas physique.
-- Un fit isole a mis 777.8 s la ou ses cinq homologues en ont mis ~42 s (d_sigma=3, budget 300000, seed 20260404), soit un facteur 18 en temps d'horloge. Ses grandeurs numeriques (rang effectif 31.99, NMAE 3.887e-06, parametres 118864) sont alignees sur celles de ses homologues : anomalie de temps machine, pas de calcul. Les temps de fit de cette configuration sont a lire avec cette reserve.
-- Aucun budget ne resout les deux chaines de la figure 2 simultanement : a 300000 appels, d_sigma=0 resout 5 seeds sur 5 et d_sigma=5 une sur cinq. La figure porte cette fraction en clair.
-- Le livrable est nomme 'phase4_agrege.csv' et non 'phase4_agrégé.csv' : nom de fichier ASCII, par prudence sur un systeme de fichiers Windows.
-- Le manifeste rapporte l'arbre de travail comme 'dirty' : le code de l'experience (sigma_axes.py, sigma_surrogate.py, scripts/experiments/, tests/test_sigma_axes.py) n'est pas commite. Un tiers ne peut pas reproduire a partir du seul hash de commit tant que ce n'est pas fait.
+- PLAFOND DE RANG — AUCUN RANG DE CE RAPPORT N'EST CONVERGE. Verification : scripts/experiments/verify_rank_ceiling.py, artefacts verification_plafond_rang.{csv,json}. (1) TT-cross n'impose aucun cap absolu : teneva.maxvol_rect renvoie r+dr avec dr <= dr_max, borne seulement par le nombre de lignes de la matrice haute (2*r_gauche pour un coeur binaire) ; aucun parametre de plafond n'existe. (2) La borne de matricisation QTT min(2^k, 2^(d-k)) ne mord qu'aux deux extremites de la chaine (bonds 0-5 et les 5-6 derniers, qui la saturent exactement) ; a l'interieur elle vaut jusqu'a 2^24 et ne mord jamais. (3) Ce qui mord est le calendrier d'increment : maxvol_rect ajoute au plus dr_max=2 lignes par appel, chaque lien est visite deux fois par sweep, et teneva.anova(r=2) demarre a rang 2, d'ou r_k <= 2 + 2*dr_max*nswp. Le rang maximal observe vaut 0.96 a 1.07 fois cette borne sur les 25 configurations : il y est colle. Et nswp est fixe par le budget, aucune tolerance n'etant passee a teneva.cross (stop='m' partout).
+- CONSEQUENCE : LA COMPARAISON DE RANG ENTRE d_sigma EST CONFONDUE. Plus de coeurs coutent plus d'evaluations par sweep, donc nswp baisse quand d_sigma monte : a 600000 appels, nswp vaut 12.0, 12.0, 11.6, 11.0, 11.0 pour d_sigma = 0,1,2,3,5, et le plafond correspondant 50.0, 50.0, 48.4, 46.0, 46.0. La decroissance du rang effectif (43.31 -> 38.80) suit donc le plafond et non une propriete du probleme. Normalise par le plafond, le rang effectif est plat : 0.866, 0.840, 0.851, 0.881, 0.843. De meme le rang maximal interne au bloc sigma vaut 0.93 a 1.00 fois le plafond des d_sigma=2, donc lui aussi y est colle.
+- RETRACTATION. L'affirmation 'le rang du bloc sigma sature en d_sigma' n'est PAS etablie par ces donnees et ne doit pas figurer dans le manuscrit. Ce qui est mesure est que rien dans la chaine — axes partages comme bloc sigma — n'atteint son rang structurel a aucun budget teste : tout est colle au plafond du calendrier d'increment. La prediction d'un rang de bloc sigma borne par la regularite des deux agregats scalaires reste NON TESTEE. La tester demanderait de passer une tolerance e ou e_vld a teneva.cross, ou d'augmenter rank_increment, tous deux parametres geles par le protocole.
+- CE QUI SURVIT A CETTE RETRACTATION : les enonces fondes sur la precision, qui ne dependent pas du rang. A 600000 appels, d_sigma = 0,1,2,3 atteignent leur plancher d'interpolation (x1.00, x1.00, x1.01, x1.02) et d_sigma=5 s'en approche (x1.65) ; le nombre de parametres TT croit d'un facteur 1.15 de d_sigma=0 a 5 quand les entrees logiques passent de 2^48 a 2^68. Ce dernier point reste toutefois un enonce A BUDGET FIXE : les parametres valent environ 2 * (nombre de coeurs) * r^2 avec r colle au plafond, donc leur croissance mesure la taille du TT obtenu pour un budget d'oracle donne, pas la compressibilite structurelle de la representation.
+- PALIER POST-HOC. Le budget 600000 a ete ajoute APRES execution et examen de l'echelle pre-enregistree {20000, 60000, 150000, 300000}, sur demande. Applique uniformement aux cinq d_sigma ; planchers reutilises, donc les deux paliers se comparent au plancher identique. Tableau distinct.
+- 6a REJOUEE A 600000, HORS PROTOCOLE (phase6a_ordre_modes_600k*). A 150000, budget specifie, les neuf fits sont UNRESOLVED dans les trois ordres et la comparaison mesure une vitesse de convergence. A 600000 la lecture s'inverse : 'interleaved' paraissait ~2x meilleur que 'tail' en NMAE (6.14e-05 contre 1.31e-04) ; une fois resolus, 'tail' est legerement meilleur (4.684e-06 contre 5.143e-06) tandis que 'interleaved' est 5 % moins cher en parametres (189881 contre 199891). L'ordre 'tail' de l'experience principale n'est pas favorise ; il reste le seul ordre additif, seul a permettre l'alignement coeur par coeur de la figure 2.
+- 6a a 600000 : l'ordre 'tail' n'a pas ete refitte, il est repris de phase4b_resultats.csv restreint aux trois seeds du controle (configuration identique, determinisme verifie). SEED DIVERGENTE : dans l'ordre 'head', la seed 20260403 donne 4.003e-05, huit fois ses homologues (5.159e-06 et 5.474e-06), et reste UNRESOLVED ; elle explique a elle seule l'ecart-type de 2.0e-05 et la moyenne de 1.689e-05 de cette ligne, qui n'est donc pas interpretable telle quelle. Rapportee, non exclue.
+- 6a a 600000 : planchers repris du run a 150000 (independants du budget). Le run precedent ne stockait pas le sous-echantillon de controle, donc aucune verification d'invariance par permutation n'etait possible pour le premier ordre reutilise ('head') ; la reference a ete etablie sur lui et 'interleaved' verifie contre elle a 0.00e+00 sur 32 points. L'invariance avait ete mesuree a 5.58e-16 lors du run a 150000.
+- RUN DIAGNOSTIQUE HORS PROTOCOLE : d_sigma=5 a n_sigma=32 modifie un parametre gele et produit une autre grille (73 coeurs, plancher 2.354e-06 contre 2.640e-06). Doubler la resolution sigma abaisse le plancher de 10.8 % mais la NMAE de 1.1 % seulement, et le rapport au plancher se degrade (1.65 -> 1.83) : l'erreur residuelle a d_sigma=5 n'est pas limitee par la resolution de l'axe sigma.
+- BALAYAGE DE MAILLE REJOUE a 600000 sur fits resolus : la dispersion entre seeds passe de 82.6 % a 25.6 % a sigma fixe, l'amplitude sur la maille restant de 10.2 % contre 44.9 % pour le plancher. Les deux balayages sont rapportes ; le plancher, sans TT, est partage. Le balayage echantillonne 20 valeurs de noeud a noeud et sigma_ref = 0.20 n'est pas l'un des 20 (voisins 0.198596 et 0.200526) : ECART AU PROTOCOLE non corrige a posteriori.
+- BUG CORRIGE PENDANT LA PHASE 6 : le premier passage de 6b n'executait que d_sigma=0, un 'break' terminant la boucle sur d_sigma au lieu de sauter la seule chaine 8D redondante. Corrige en 'continue', logique reverifiee, 6b entierement relancee. 6a n'utilisait qu'une valeur de d_sigma et n'etait pas affectee.
+- La colonne 'max r bloc sigma' ne mesure pas la meme chose a d_sigma=1 qu'au-dela : a d_sigma=1 le bloc ne contient qu'un axe physique et ses liens internes sont ceux de sa decomposition QTT binaire ; a partir de d_sigma=2 ils incluent les liens entre axes sigma. La discontinuite du panneau gauche de la figure 3 est definitionnelle, pas physique.
+- TEMPS D'HORLOGE CONTAMINES : phase4c_nsigma32, phase4d_cell600k, la phase 6 et sa reprise a 600000 ont tourne partiellement en concurrence ; leurs colonnes fit_seconds ne sont pas comparables au balayage principal. Les grandeurs numeriques ne le sont pas, le determinisme a seed fixee ayant ete verifie. Voir aussi le fit isole a 777.8 s (d_sigma=3, budget 300000, seed 20260404) contre ~42 s pour ses homologues.
+- Le manifeste rapporte l'arbre de travail comme 'dirty' : le code de l'experience n'est pas commite, donc le hash de commit ne suffit pas a reproduire.

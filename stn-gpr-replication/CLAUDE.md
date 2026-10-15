@@ -83,11 +83,16 @@ heading rather than reading end to end.
    (~0.10 of a ~0.11 MAE). Cubic on all axes cuts MAE ~12x and bias ~60x for about
    2x query cost (`O(sum k_j q_j)` scales gently — corner stencil would pay 2x
    *per* cubic axis instead). Default `--cubic-axes all` in the vol scripts.
-3. **Layout (interleaved vs blocked) depends on the basket, not a universal rule.**
-   Geometric + `P/basket_spot`: price is exactly spot-free, so blocked wins (spot
-   QTT cores collapse to rank 1, confirmed by truncation sweep). Arithmetic: genuine
+3. **Layout (interleaved vs blocked) depends on the basket *and on the grid
+   family*, not a universal rule.** On the **pricing** grids, geometric +
+   `P/basket_spot`: price is exactly spot-free, so blocked wins (spot QTT cores
+   collapse to rank 1, confirmed by truncation sweep). Arithmetic: genuine
    `S_i`-`sigma_i` coupling via `exp(sigma_i sigma_j C_ij T)`, so interleaved wins
-   (1.7-2.8x better MAE, less storage). Don't default one for both baskets.
+   (1.7-2.8x better MAE, less storage). **On the 13-D `bounded_standardized_risk`
+   grid the geometric rule inverts**: interleaved gave 0.06% one-day VaR error
+   against blocked's 0.60% at budget 150k and equal effective rank. That grid's
+   strike coordinate is itself a function of sigma, so the sigma-strike coupling
+   no longer sits where blocked puts it. Measure per (basket, grid family).
 4. **TT-cross truncation should target the interpolation floor, not `1e-8`.**
    Default truncation gives ~8x more storage than truncating near the actual
    accuracy floor, for a <2% MAE change. Always sweep truncation when reporting
@@ -137,7 +142,64 @@ heading rather than reading end to end.
    always runs to the requested budget (`stop: "m"` in diagnostics), so rank grows
    long after MAE has stopped improving. Not yet fixed; budget past ~100k
    evaluations on the 13-D problem is likely wasted, check the `effective_rank`
-   vs `mae` curve before spending more.
+   vs `mae` curve before spending more. On the 8-D geometric problem the VaR
+   error plateaus at 35k and is flat to 400k, and it is *not monotone* on the
+   way there: 20k measured worse (6.4%) than 10k (2.5%). Never pick a budget
+   from one point. See gotcha 14 for why more budget can *lower* a risk metric
+   even though the fit itself never degrades.
+
+13. **A TT fit at a fixed budget is a draw, exactly like a Monte Carlo run.**
+    Single-seed 13-D budget sweeps returned 0.06% at 150k where the 3-seed rms
+    is 1.81% - the lucky seed, and it was nearly published as "the" accuracy.
+    Both approximate arms in `benchmark_var_qtt_basket_book.py` therefore sweep
+    several seeds and report the quadratic mean plus the range. A different
+    ANOVA seed picks different pivots, hence a different error texture - same
+    mechanism as gotcha 14.
+
+14. **A bigger TT budget can give a *worse* VaR while the fit strictly
+    improves. Do not tune a risk metric through the price error.** On the 13-D
+    risk grid the portfolio price MAE falls monotonically across the whole
+    sweep - 3.69e-1 / 1.54e-1 / 4.49e-2 / 1.66e-2 / 6.31e-3 / 3.50e-3 /
+    2.04e-3 at 25k-400k, a factor 180, with 400k the *best* of all - while the
+    3-seed VaR error runs 3.45 / 11.12 / 4.29 / 1.81 / 0.33 / **0.11** / 0.44 %.
+    What oscillates is the survival rate `MAE(PnL)/MAE(price)`: 0.261, 0.409,
+    0.331, 0.329, 0.162, 0.221, 0.589. A VaR is a quantile of `V(s) - V(0)`
+    over a one-day displacement, so only the part of the error that *varies*
+    over ~1% in spot survives; the smooth part cancels. TT-cross is an
+    interpolant, exact at its pivots and wandering between them, and
+    `maxvol_rect` reselects those pivots every sweep (`dr_max=2` rows added per
+    pass). More budget therefore does not refine the same approximation - it
+    reshuffles *where* the error vanishes. Amplitude falls monotonically;
+    spatial texture is redrawn, and texture is what the cancellation sees.
+    Monte Carlo under CRN is the mirror image, not merely immune: its error is
+    a bias common to the whole scenario cloud that the P&L difference removes
+    (survival 0.028 / 0.062 / 0.073 / 0.012 at 1k-64k paths). Its *price*
+    error is not even monotone - the 3-seed mean rose from 0.55% to 0.69% of
+    the book between 16k and 64k paths, being the size of a random bias - while
+    its *risk* error falls cleanly (VaR 95 0.82% -> 0.18%). QTT: price
+    converges, risk oscillates; MC: price oscillates, risk converges. Neither
+    price error predicts the risk error. Consequence: the cheap, reference-free stopping criterion
+    (global fit norm) does not flag the bad budgets, so the budget must be swept
+    against the risk metric itself. `rapport_var_qtt_panier_otm13d.md` section
+    4.3 and `experiments/figures/var_qtt_versus_monte_carlo.pdf`.
+
+11. **A put-only surrogate prices geometric-basket calls for free, exactly.**
+    `C - P = e^{-rT}(F - K)` with `F = G_0 exp(carry T)` is model-exact and
+    costs no pricing work, so the call error *equals* the put error — measured
+    residual `5.2e-14` on a 6-option book. `geometric_basket_parity_offset` in
+    `pricers.py`. There is nothing to gain by also training on calls; it halves
+    the surface to learn. Does not transfer to the arithmetic basket, whose
+    forward has no such closed form.
+
+12. **Wall-clock numbers from this machine carry a ~2.7x dispersion and cannot
+    be compared across runs.** The nested-MC arm, byte-identical work, measured
+    2.74 s and 7.39 s in two runs, and `[3.80, 7.50, 7.39]` across three
+    repeats inside one run; the same TT fit measured 9.14 s in one section and
+    3.35 s in another section of the *same process*. Any cost claim must be an
+    intra-run ratio, and preferably a machine-free one (oracle calls, path
+    counts). `benchmark_var_qtt_basket_book.py` takes `--timing-repeats` and
+    keeps min/max in the JSON for this reason — read the spread, not the
+    median alone.
 
 ## Where things live
 
@@ -146,6 +208,11 @@ heading rather than reading end to end.
 - `scripts/validation/`: targeted comparisons — `compare_basket_layouts.py`,
   `compare_monte_carlo.py`, `compare_arithmetic_reference.py`,
   `validate_portfolio_var.py`, plus the colleague's Greeks validators.
+  `benchmark_var_qtt_basket_book.py` is the one-day VaR protocol on a 6-option
+  call/put book over five synthetic stocks: closed form vs nested Monte Carlo
+  vs put-only QTT lifted by parity, all on shared scenarios, with both
+  accuracy/cost curves measured in one process. Results and threats to
+  validity: `rapport_var_qtt_panier.md`.
   `benchmark_vol_risk_grids.py` is the paper-grade accuracy/query-cost protocol
   for the vol-extended risk grids (surrogate vs Monte Carlo vs the closed-form
   oracle; profiles `smoke` ~3 min, `intermediate` ~20 min, `paper` ~2 h).

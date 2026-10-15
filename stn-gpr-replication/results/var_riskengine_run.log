@@ -1,0 +1,45 @@
+1. rendements de marche (RiskEngine / yfinance)
+   250 scenarios, 2025-09-19 -> 2026-09-17
+   AAPL   vol annualisee realisee 0.251
+   MSFT   vol annualisee realisee 0.326
+   NVDA   vol annualisee realisee 0.381
+   JPM    vol annualisee realisee 0.222
+   XOM    vol annualisee realisee 0.260
+2. chocs de volatilite synthetiques, conditionnels aux rendements
+   eta 0.0537, rho' 0.760
+   levier realise -0.567, correlation des chocs de vol 0.472
+3. scenarios de marche
+   spot [90.01, 115.51], vol [0.211, 0.510]
+   hors boite de la grille: 0 spots, 0 vols
+4. apprentissage des grilles hybrides (cout d'initialisation)
+   budget  20,000:    7.7 s, rang 11.08, 14,030 parametres
+   budget  60,000:    9.3 s, rang 16.50, 31,114 parametres
+   budget 150,000:   23.3 s, rang 22.53, 57,956 parametres
+5. revalorisation et VaR
+  forme fermee            :    0.000 s
+  grille hybride  20,000  :    0.007 s
+  grille hybride  60,000  :    0.013 s
+  grille hybride 150,000  :    0.048 s
+  MC   4,096 independant:    0.103 s
+  MC  16,384 independant:    0.397 s
+  MC  65,536 independant:    4.326 s
+  MC 262,144 independant:   20.054 s
+  MC  16,384 CRN        :    0.429 s
+  MC 262,144 CRN        :   26.184 s
+
+  bras                           VaR 95     VaR 99      ES 99  err VaR99   err rel   ratio    cout s
+  closed_form                   1124.03    1409.87    1621.23       0.00     0.00%     nan      0.00
+  hybrid_grid_20000             1088.55    1389.69    1560.25     -20.18    -1.43%   0.269      7.68
+  hybrid_grid_60000             1135.39    1419.60    1640.10       9.73     0.69%   0.390      9.28
+  hybrid_grid_150000            1139.48    1428.52    1642.76      18.64     1.32%   0.947     23.33
+  monte_carlo_4096              1217.50    1478.88    1786.31      69.01     4.89%   1.008      0.10
+  monte_carlo_16384             1059.21    1390.17    1522.80     -19.70    -1.40%   1.396      0.40
+  monte_carlo_65536             1119.31    1470.90    1639.17      61.03     4.33%   1.162      4.33
+  monte_carlo_262144            1121.97    1376.52    1591.69     -33.36    -2.37%   1.068     20.05
+  monte_carlo_crn_16384         1136.07    1424.25    1638.13      14.38     1.02%   0.048      0.43
+  monte_carlo_crn_262144        1122.15    1407.21    1618.01      -2.66    -0.19%   0.068     26.18
+
+  IC bootstrap 95% de la VaR 99% de reference: [1247.87, 1698.61]
+
+ecrit results\var_riskengine_basket.json
+ecrit results\var_riskengine_basket.csv
